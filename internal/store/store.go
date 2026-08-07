@@ -216,3 +216,8 @@ func (d *DB) SkipReasonCounts(ctx context.Context) (map[string]int, error) {
 	}
 	return out, rows.Err()
 }
+
+// ErrNotFound is returned when a lookup by id finds nothing. Callers map it
+// to 404 rather than 500: a missing plan is a client error, not a server
+// fault.
+var ErrNotFound = errors.New("store: not found")

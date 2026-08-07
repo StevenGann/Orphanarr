@@ -47,7 +47,14 @@ jobs:
       - name: Build static binary
         env:
           CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" ./cmd/orphanarr
+        run: go build -trimpath -ldflags="-s -w" -o orphanarr ./cmd/orphanarr
+
+      # The unit tests prove each package alone. This proves what only exists
+      # once they are wired together — and asserts I1 against a real file
+      # rather than a mock, by checksumming the source before and after a
+      # full execute.
+      - name: End-to-end round trip
+        run: bash tests/e2e/roundtrip.sh ./orphanarr
 
   image:
     name: Docker — build only, no push

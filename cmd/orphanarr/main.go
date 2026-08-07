@@ -103,6 +103,16 @@ func run(configDir, addr string, log *slog.Logger) error {
 
 	pl := pipeline.New(db, guard, cfg)
 
+	// Reconcile BEFORE any new work, so an unclean exit is repaired rather
+	// than resumed on top of. A half-written destination that a scanner
+	// has already indexed is the failure this prevents.
+	if err := pl.Reconcile(ctx); err != nil {
+		log.Warn("reconcile reported problems", "err", err)
+	}
+	if err := pl.Reload(ctx); err != nil {
+		log.Warn("could not load clients and libraries", "err", err)
+	}
+
 	// Clients and libraries are configured through the UI and loaded from
 	// the database. With none configured the program serves its UI and
 	// does nothing, which is the correct behaviour for a tool whose entire
@@ -116,7 +126,7 @@ func run(configDir, addr string, log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           api.New(db, cfg, pl, version).Handler(),
+		Handler:           api.New(db, cfg, pl, pl, version).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

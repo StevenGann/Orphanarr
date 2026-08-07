@@ -47,6 +47,7 @@ type Status struct {
 	SkipReasons map[string]int    `json:"skip_reasons"`
 	Problems    []string          `json:"problems,omitempty"`
 	Settings    map[string]string `json:"settings"`
+	Counts      map[string]int    `json:"counts"`
 }
 
 type ClientStatus struct {
@@ -72,6 +73,10 @@ type LibraryStatus struct {
 	// from "copy only — separate mounts", and without it the remediation
 	// banner tells a user to do what they have already done.
 	Hardlinks string `json:"hardlinks"`
+	// HardlinkDetail carries the remediation. EXDEV on separate mounts and
+	// EXDEV because the source is :ro need different advice, and a badge
+	// alone cannot give it.
+	HardlinkDetail string `json:"hardlink_detail,omitempty"`
 }
 
 // Server wires the routes.
@@ -79,12 +84,17 @@ type Server struct {
 	db      *store.DB
 	cfg     config.Config
 	scanner Scanner
+	mgr     Manager
 	version string
 }
 
-func New(db *store.DB, cfg config.Config, sc Scanner, version string) *Server {
-	return &Server{db: db, cfg: cfg, scanner: sc, version: version}
+func New(db *store.DB, cfg config.Config, sc Scanner, mgr Manager, version string) *Server {
+	return &Server{db: db, cfg: cfg, scanner: sc, mgr: mgr, version: version}
 }
+
+// SetConfig updates the live config so a settings save takes effect for
+// subsequent requests — including the API key and the dry-run banner.
+func (s *Server) SetConfig(c config.Config) { s.cfg = c }
 
 // NewAPIKey generates a key. Shown once, at first run.
 func NewAPIKey() string {
@@ -107,6 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/settings", s.auth(http.HandlerFunc(s.putSettings)))
 	mux.Handle("GET /api/v1/events", s.auth(http.HandlerFunc(s.getEvents)))
 	mux.Handle("POST /api/v1/scan", s.auth(http.HandlerFunc(s.postScan)))
+	s.routes(mux)
 
 	mux.Handle("/", web.Handler())
 	return logging(mux)
@@ -149,6 +160,9 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		st.SkipReasons = counts
 	}
 	st.Problems = append(st.Problems, s.cfg.Validate()...)
+	if counts, err := s.db.Counts(r.Context()); err == nil {
+		st.Counts = counts
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 

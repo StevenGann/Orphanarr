@@ -36,13 +36,20 @@ func Handler() http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// A strict CSP because this program is remote arbitrary file write
+		// A strict CSP, because this program is remote arbitrary file write
 		// by design (BRIEF Q19) and the UI takes destination paths as
-		// input. 'unsafe-inline' is present only for the single inlined
-		// script and style; nothing is fetched from anywhere.
+		// input.
+		//
+		// There is no 'unsafe-inline' anywhere: the script and stylesheet
+		// are separate files, which is worth the extra two requests
+		// precisely because it lets this header forbid inline execution
+		// outright. The UI also never assigns innerHTML — every node is
+		// built with createElement, because the strings it renders are
+		// torrent names and a torrent name is hostile input.
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "+
-				"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")
+			"default-src 'none'; script-src 'self'; style-src 'self'; "+
+				"connect-src 'self'; img-src 'self' data:; "+
+				"base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		fileServer.ServeHTTP(w, r)
