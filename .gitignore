@@ -13,6 +13,12 @@ venv/
 dist/
 build/
 
+# Go
+/orphanarr
+*.test
+*.out
+coverage.txt
+
 # Node / web UI
 node_modules/
 .vite/
