@@ -10,8 +10,8 @@ venv/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
-dist/
-build/
+/dist/
+/build/
 
 # Go
 /orphanarr
@@ -23,13 +23,19 @@ coverage.txt
 node_modules/
 .vite/
 
-# Runtime data
+# Runtime data.
+#
+# These are ANCHORED with a leading slash so they match only at the repo
+# root. Unanchored, "config/" matches internal/config/ at any depth — which
+# it did, silently excluding a whole package from the commit that
+# introduced it and breaking the build on CI while it compiled fine
+# locally. git status does not show what it is ignoring.
 *.db
 *.db-journal
 *.sqlite3
-config/
-data/
-logs/
+/config/
+/data/
+/logs/
 
 # Editors / OS
 .DS_Store

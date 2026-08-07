@@ -49,6 +49,46 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w" ./cmd/orphanarr
 
+  image:
+    name: Docker — build only, no push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@6524bf65af31da8d45b59e8c27de4bd072b392f5 # v3.8.0
+
+      # amd64 only here. The release workflow builds both architectures;
+      # CI only needs to know the Dockerfile still works, and building
+      # arm64 on every push doubles the wait for no extra signal.
+      - uses: docker/build-push-action@48aba3b46d1b1fec4febb7c5d0c644b249a11355 # v6.10.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: orphanarr:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # An image that builds but cannot start is not a passing build. This
+      # also proves CGO_ENABLED=0 actually held: a cgo-linked binary would
+      # fail here against Alpine's musl.
+      - name: The image starts and reports its version
+        run: docker run --rm orphanarr:ci orphanarr --version
+
+      - name: The health endpoint answers
+        run: |
+          docker run -d --name ci -p 8790:8790 orphanarr:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8790/api/v1/health; then
+              echo "; healthy"; docker rm -f ci; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::container never became healthy"
+          docker logs ci
+          docker rm -f ci
+          exit 1
+
   corpus:
     name: Corpus — classifier specification
     runs-on: ubuntu-latest
