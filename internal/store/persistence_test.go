@@ -220,3 +220,43 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+// System states must refresh; only the user's decisions are sticky.
+//
+// Making `state` wholly sticky fixed one bug and created another: an
+// orphan blocked by a cross-seed would stay blocked forever after the
+// cross-seed was removed — a decision nobody made, that nothing reverses,
+// and that looks exactly like the tool ignoring an item for no reason.
+func TestSystemStatesRefreshButUserDecisionsDoNot(t *testing.T) {
+	ctx := context.Background()
+	db := newDB(t)
+	cid := seedClient(t, db)
+
+	// A system verdict must clear when the condition that caused it does.
+	blocked := Orphan{ClientID: cid, ExternalID: "a", Name: "X", State: "blocked"}
+	id, err := db.UpsertOrphan(ctx, blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked.State = "discovered" // the cross-seed went away
+	if _, err := db.UpsertOrphan(ctx, blocked); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetOrphan(ctx, id)
+	if got.State != "discovered" {
+		t.Errorf("state = %q; a system verdict must refresh, or an orphan blocked "+
+			"once stays blocked forever", got.State)
+	}
+
+	// A user decision must NOT.
+	if err := db.SetOrphanState(ctx, id, "ignored"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpsertOrphan(ctx, blocked); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.GetOrphan(ctx, id)
+	if got.State != "ignored" {
+		t.Errorf("state = %q; the user's Ignore must survive a re-scan", got.State)
+	}
+}

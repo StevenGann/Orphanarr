@@ -37,13 +37,16 @@ type Orphan struct {
 
 // UpsertOrphan records or refreshes a discovered orphan.
 //
-// Two columns are deliberately NOT in the update list. first_seen_at,
-// because the settle window is measured from it and resetting it on every
-// poll would mean nothing ever settles. And state, because it holds the
-// user's sticky decisions — `ignored` and `filed` — which a re-scan
-// recomputing "discovered" would silently undo every scan interval. The UI
-// promises "it will be skipped on future scans"; this is what makes that
-// true.
+// first_seen_at is deliberately NOT in the update list: the settle window
+// is measured from it, and resetting it on every poll would mean nothing
+// ever settles.
+//
+// state is updated CONDITIONALLY. The user's decisions — `ignored` and
+// `filed` — are sticky, because a re-scan recomputing "discovered" would
+// silently undo them every scan interval and the UI promises "it will be
+// skipped on future scans". Everything else is a system verdict and must
+// refresh: an orphan blocked by a cross-seed has to stop being blocked
+// when the cross-seed goes away.
 func (d *DB) UpsertOrphan(ctx context.Context, o Orphan) (int64, error) {
 	raw := func(m json.RawMessage, def string) string {
 		if len(m) == 0 {
@@ -59,6 +62,14 @@ func (d *DB) UpsertOrphan(ctx context.Context, o Orphan) (int64, error) {
                            files_json, first_seen_at, last_seen_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(client_id, external_id) DO UPDATE SET
+            -- Only the USER'S decisions are sticky. System states
+            -- (discovered, blocked, unknown) must refresh, or an orphan
+            -- blocked by a cross-seed stays blocked forever after the
+            -- cross-seed is removed — a decision nobody made, that nothing
+            -- reverses, and that looks exactly like the tool ignoring an
+            -- item for no reason.
+            state=CASE WHEN orphan.state IN ('ignored','filed')
+                       THEN orphan.state ELSE excluded.state END,
             name=excluded.name, save_path=excluded.save_path,
             fingerprint=excluded.fingerprint, size_bytes=excluded.size_bytes,
             media_type=excluded.media_type,
