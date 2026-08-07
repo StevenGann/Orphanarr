@@ -1,0 +1,35 @@
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / web UI
+node_modules/
+.vite/
+
+# Runtime data
+*.db
+*.db-journal
+*.sqlite3
+config/
+data/
+logs/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+CLAUDE.md
+/.claude
+/team
