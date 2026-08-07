@@ -12,11 +12,11 @@ const (
 	famOther family = iota
 	famVideo
 	famAudio
-	famBook    // reflowable ebook formats
-	famComic   // comic archives
-	famROM     // console images with an unambiguous platform
-	famPDF     // neither book nor comic on its own — see the tie-break
-	famImage   // cover art, scanned pages
+	famBook  // reflowable ebook formats
+	famComic // comic archives
+	famROM   // console images with an unambiguous platform
+	famPDF   // neither book nor comic on its own — see the tie-break
+	famImage // cover art, scanned pages
 	famSubtitle
 	famSidecar // nfo, sfv, opf, cue, m3u — metadata about the payload
 	famArchive // rar/7z sets: the payload is invisible until extraction

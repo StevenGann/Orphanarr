@@ -60,9 +60,9 @@ var (
 	reSeasonWord   = regexp.MustCompile(`(?i)\bSeason[\s._-]*(\d{1,4})\b`)
 	// The space in the separator class matters: scene dots are normalised to
 	// spaces before this runs, so "2024.03.14" reaches us as "2024 03 14".
-	reAirDate = regexp.MustCompile(`\b((?:19|20)\d{2})[-._ ](\d{2})[-._ ](\d{2})\b`)
-	reCompleteSer  = regexp.MustCompile(`(?i)\b(COMPLETE[\s._-]*SERIES|THE[\s._-]*COMPLETE[\s._-]*SERIES)\b`)
-	reEpNums       = regexp.MustCompile(`(?i)E(\d{1,3})`)
+	reAirDate     = regexp.MustCompile(`\b((?:19|20)\d{2})[-._ ](\d{2})[-._ ](\d{2})\b`)
+	reCompleteSer = regexp.MustCompile(`(?i)\b(COMPLETE[\s._-]*SERIES|THE[\s._-]*COMPLETE[\s._-]*SERIES)\b`)
+	reEpNums      = regexp.MustCompile(`(?i)E(\d{1,3})`)
 
 	// Anime: "[Group] Series - 12 (1080p) [CRC]". The leading bracket group
 	// is the fansub group, the trailing one a CRC32 — neither is the title.
