@@ -445,13 +445,30 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			continue
 		}
 		if blocked[i] {
-			// An \*arr already owns this payload. Filing it would produce a
+			// An *arr already owns this payload. Filing it would produce a
 			// duplicate library entry and, under copy-only, a full second
 			// copy of content that is already imported.
+			//
+			// The block is closed TRANSITIVELY, which can over-block: a
+			// season pack sharing one file with a pack that shares one file
+			// with an *arr-owned episode is refused for content no *arr
+			// owns. That trade is deliberate and priced — an over-block
+			// costs an orphan sitting in review, an under-block costs a
+			// full duplicate copy, and §3.4 ranks the latter highest for
+			// damage. But it must be VISIBLE: this is surfaced with the
+			// overlap chain named, not silently skipped.
+			chain := overlapChain(ov, i, candidates)
 			sum.Skipped["CROSS_SEED_BLOCKED"]++
+			orphanID, _ := p.db.UpsertOrphan(ctx, store.Orphan{
+				ClientID: clientRowID(c), ExternalID: string(c.Item.ID),
+				Name: c.Item.Name, SavePath: c.Item.SavePath,
+				Fingerprint: c.Fingerprint, State: "blocked",
+				MediaType: "", Reason: "cross_seed:" + chain,
+			})
 			p.db.LogEvent(ctx, store.Event{
-				Level: "warn", Code: "CROSS_SEED_BLOCKED",
-				Message: c.Item.Name + ": overlaps a categorised torrent on a configured client",
+				Level: "warn", Code: "CROSS_SEED_BLOCKED", OrphanID: &orphanID,
+				Message: c.Item.Name + ": shares content with a categorised torrent " +
+					"an *arr already manages (" + chain + ")",
 			})
 			continue
 		}
@@ -459,7 +476,7 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 		// of work rather than producing two library entries pointing at
 		// one payload (I4). Transitively: claim the peers' peers too, or a
 		// chain A~B~C leaves C planned separately.
-		for _, peer := range ov.Transitive(i, candidates) {
+		for _, peer := range ov.Transitive(i) {
 			claimed[peer] = true
 			sum.Skipped["SKIP_OVERLAP_COLLAPSED"]++
 		}
@@ -623,17 +640,23 @@ func (p *Pipeline) savePlan(ctx context.Context, orphanID int64, t media.Type,
 	// did not.
 	method := "copy"
 	if p.Config().Mode != "copy" {
-		src := ""
+		// Probe the registered download ROOT, not path.Dir(firstFile).
+		// Keying on a torrent's own subdirectory writes a probe file
+		// inside someone's seeding data, once per orphan, and grows the
+		// cache without bound — which is the write the guard now refuses
+		// outright.
 		for _, f := range res.Files {
-			if !f.Skip && f.Src.AbsPath != "" {
-				src = path.Dir(f.Src.AbsPath)
+			if f.Skip || f.Src.AbsPath == "" {
+				continue
+			}
+			root, ok := p.guard.SourceRootFor(f.Src.AbsPath)
+			if !ok {
 				break
 			}
-		}
-		if src != "" {
-			if r := p.prober.EnsureProbed(src, lib.Root); r.Outcome == probe.Available {
+			if r := p.prober.EnsureProbed(root, lib.Root); r.Outcome == probe.Available {
 				method = "hardlink"
 			}
+			break
 		}
 	}
 	warns := make([]string, 0, len(res.Warnings))
@@ -675,6 +698,26 @@ func (p *Pipeline) savePlan(ctx context.Context, orphanID int64, t media.Type,
 	}
 
 	return p.db.SavePlan(ctx, pl)
+}
+
+// overlapChain names the peers that caused a block, so an over-block is
+// something the user can see and argue with rather than an item that
+// silently never appears.
+func overlapChain(ov *scan.Overlap, idx int, all []scan.Candidate) string {
+	peers := ov.Transitive(idx)
+	if len(peers) == 0 {
+		return "direct overlap"
+	}
+	names := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if p < len(all) {
+			names = append(names, all[p].Item.Name)
+		}
+	}
+	if len(names) == 0 {
+		return "direct overlap"
+	}
+	return "via " + strings.Join(names, ", ")
 }
 
 func clientRowID(c scan.Candidate) int64 {
@@ -767,7 +810,11 @@ func (p *Pipeline) Status(ctx context.Context) api.Status {
 		// Read the cached value. Probing here wrote a file into every
 		// library root on every /system/status request — and the UI polls
 		// that every 30 seconds, forever, in dry-run too.
-		ls.Writable = writable[l.Root]
+		// In dry-run no probe runs, so this is UNKNOWN rather than false.
+		// Reporting false would be a false negative in the shipped default.
+		w, probed := writable[l.Root]
+		ls.Writable = w
+		ls.WritableKnown = probed
 
 		// Reported as three outcomes, not a boolean. Without the
 		// read-only case the remediation banner tells a user running :ro

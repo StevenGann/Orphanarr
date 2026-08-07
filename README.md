@@ -30,9 +30,10 @@ This list is the point of the project, not a disclaimer.
 - **It never overwrites anything.** There is no overwrite collision policy — not as a default,
   not as an option. Publishing uses `link(2)`, which returns `EEXIST`, rather than `rename(2)`,
   which destroys an existing destination silently and with no error.
-- **It never guesses.** `unknown` is a first-class outcome with a machine-readable reason. 17 of
-  the 94 classification cases in the corpus land there, and that is the design working — a
-  classifier that never refuses has simply moved its errors into your library.
+- **It never guesses.** `unknown` is a first-class outcome with a machine-readable reason. 15 of
+  the 100 classification cases in the corpus expect exactly that, and that is the design working —
+  a classifier that never refuses has simply moved its errors into your library. (`corpus_lint.py`
+  prints both figures; this line quotes its output rather than restating it.)
 - **It does not extract archives, write tags, rewrite archives, or call out to TMDB/TVDB.**
 
 ## Install
@@ -119,7 +120,8 @@ Two things there are worth reading even if you never touch the code:
 
 - **§0** — the findings the whole design turns on, including several the qBittorrent wiki still
   documents incorrectly, and a note telling you to trust the citations over the counts because
-  the document has been wrong about its own tallies five times.
+  the document has been wrong about its own tallies six times — which is why every count in it
+  is now printed by a script rather than typed into prose.
 - **Appendix A** — the folklore this design deliberately contradicts, each entry with its source.
 
 ## Licence

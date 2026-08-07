@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -256,5 +257,67 @@ func TestClientWithoutCategoriesIsNeverScanned(t *testing.T) {
 	}
 	if e.Refusal == "" {
 		t.Error("the refusal must carry a reason the user can act on")
+	}
+}
+
+// I1's enforcement depends on the Guard being GIVEN a source root, and
+// under identity path-mapping the only place that happens is the scan.
+//
+// This test exists because the previous regression guard was rewritten
+// into a positive control that passed before the fix as well as after it,
+// so nothing in the suite would have caught the wiring being removed. It
+// asserts the WIRING, not the Guard: if `ScanNow` stops calling
+// AddSourceRoot, this fails and the fsx tests do not.
+func TestScanRegistersTheSourceRootSoI1IsArmed(t *testing.T) {
+	p, db, g, base := newPipeline(t)
+	ctx := context.Background()
+
+	dlRoot := filepath.Join(base, "dl")
+	dl := filepath.Join(dlRoot, "Release")
+	lib := filepath.Join(base, "media", "movies")
+	mustWrite(t, filepath.Join(dl, "the.matrix.1999.mkv"), "payload")
+	mustMkdir(t, lib)
+	g.AddLibraryRoot(lib)
+
+	// Precondition: nothing is registered, so I1 cannot fire yet. This is
+	// the state a fresh process is in under identity mapping.
+	if roots := g.SourceRoots(); len(roots) != 0 {
+		t.Fatalf("expected no source roots before the scan, got %v", roots)
+	}
+
+	cid, _ := db.SaveClient(ctx, store.Client{Name: "qb", BaseURL: "http://x", Enabled: true})
+	empty := ""
+	p.SetClients(ctx, []*ClientEntry{{
+		Cfg:    client.Config{ID: cid, Name: "qb"},
+		Mapper: pathmap.Identity(), // NO explicit mappings: the documented default
+		Client: &fakeClient{
+			id:   itoa(cid),
+			caps: client.Capabilities{Categories: true},
+			items: []client.Item{{
+				ID: "h1", Name: "Release", Category: &empty, Complete: true,
+				SavePath: dlRoot,
+			}},
+			files: map[client.ExternalID][]client.File{
+				"h1": {{RelPath: "Release/the.matrix.1999.mkv", Size: 7, Wanted: true}},
+			},
+		},
+	}})
+	p.SetLibraries([]layout.Library{movieLibrary(lib)})
+
+	if _, err := p.ScanNow(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := g.SourceRoots()
+	if len(roots) == 0 {
+		t.Fatal("the scan registered NO source root, so I1's check can never fire — " +
+			"this is the shipped default deployment, where the container mounts " +
+			"the client's download folder at the path the client reports")
+	}
+
+	// And it must actually protect the payload.
+	victim := filepath.Join(dl, "the.matrix.1999.mkv")
+	if err := g.Chmod(victim, 0o600); !errors.Is(err, fsx.ErrSourceRoot) {
+		t.Fatalf("chmod of a seeding file returned %v, want ErrSourceRoot", err)
 	}
 }

@@ -56,6 +56,27 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 		return fmt.Errorf("no library configured for %s", pl.MediaType)
 	}
 
+	// I1 is enforced by matching against REGISTERED source roots, and under
+	// identity path-mapping the only thing that registers them is a scan.
+	// So a fresh process — restarted, with a plan persisted before the
+	// restart and the first scan tick fifteen minutes away — would execute
+	// with zero source roots and I1's check unable to fire.
+	//
+	// Refusing costs the user one "Scan now" click. Proceeding costs I1 in
+	// exactly the library-overlaps-download misconfiguration the invariant
+	// exists for.
+	for _, s := range pl.Steps {
+		if s.SrcPath == "" {
+			continue
+		}
+		if _, ok := p.guard.SourceRootFor(s.SrcPath); !ok {
+			return fmt.Errorf("this plan's download root is not registered yet, so the "+
+				"source-file protection is not armed for %s. Run a scan first — that "+
+				"is what registers it", s.SrcPath)
+		}
+		break
+	}
+
 	steps := toExecSteps(pl.Steps)
 
 	// Skip steps a previous attempt already completed.

@@ -153,16 +153,23 @@ func (d *DB) GetOrphan(ctx context.Context, id int64) (Orphan, error) {
 	return o, nil
 }
 
-// OpenPlanFor returns an existing non-terminal plan for an orphan.
+// OpenPlanFor returns an existing DRAFT plan for an orphan.
 //
 // savePlan always INSERTed, so at the 15-minute default a single unfiled
 // orphan accrued 96 duplicate draft plans a day and the review list — which
 // caps at 200 — filled with the same item.
+//
+// Only 'draft' is reusable, and that restriction is load-bearing.
+// SavePlan's update path DELETEs and re-inserts every step, which erases
+// created_by_us and created_dirs_json — so reusing a 'failed' or 'blocked'
+// plan would destroy the undo record for files its first attempt had
+// already placed, leaving them in the library with nothing recording that
+// Orphanarr put them there.
 func (d *DB) OpenPlanFor(ctx context.Context, orphanID int64) (int64, bool) {
 	var id int64
 	err := d.sql.QueryRowContext(ctx, `
         SELECT id FROM plan
-        WHERE orphan_id = ? AND status IN ('draft','blocked','failed')
+        WHERE orphan_id = ? AND status = 'draft'
         ORDER BY id DESC LIMIT 1`, orphanID).Scan(&id)
 	return id, err == nil
 }

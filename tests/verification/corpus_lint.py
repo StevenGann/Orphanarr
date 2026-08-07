@@ -35,6 +35,8 @@ def main() -> int:
     by_difficulty: Counter[str] = Counter()
     total = 0
     negative = 0
+    typed = 0
+    unknown = 0
 
     for fname in JSONL:
         path = os.path.join(CORPUS, fname)
@@ -57,6 +59,10 @@ def main() -> int:
                 ids[row.get("id", f"<{fname}:{lineno}>")] += 1
                 by_difficulty[row.get("difficulty", "unspecified")] += 1
                 exp = row.get("expect", {})
+                if "type" in exp:
+                    typed += 1
+                    if exp.get("type") == "unknown":
+                        unknown += 1
                 if exp.get("type") in ("unknown",) or exp.get("action") in (
                     "refuse", "defer", "sanitise", "truncate", "collision", "noop"
                 ):
@@ -79,7 +85,15 @@ def main() -> int:
     if dupes:
         errors.append(f"duplicate ids: {dupes}")
 
+    # Emit the figures the README quotes, so nobody hand-copies a number
+    # again. This project has been wrong about its own tallies six times,
+    # and every one was a number typed into prose and never re-derived.
+    # The durable fix is to make the script the source and the prose the
+    # quote.
     print(f"corpus entries (jsonl): {total}")
+    print(f"classification cases:   {typed} (entries whose expect has a 'type')")
+    print(f"expect type=unknown:    {unknown} "
+          f"({unknown * 100 // max(typed, 1)}% of classification cases)")
     print(f"by difficulty:          {dict(by_difficulty)}")
     print(f"negative cases:         {negative} "
           f"({negative * 100 // max(total, 1)}% expect unknown/refuse/defer/sanitise)")

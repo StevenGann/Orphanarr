@@ -1,6 +1,7 @@
 package fsx
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -75,6 +76,11 @@ func (g *Guard) ResetLibraryRoots() {
 	g.libraryRoots = nil
 }
 
+// ErrProbeNotAtRoot means a probe was aimed somewhere other than the top
+// level of a registered root.
+var ErrProbeNotAtRoot = errors.New(
+	"fsx: a probe may only be written at the top level of a registered root")
+
 // ProbeWrite creates and removes a single named probe file.
 //
 // This is I10's carve-out, expressed AT the chokepoint rather than as an
@@ -83,11 +89,18 @@ func (g *Guard) ResetLibraryRoots() {
 // port — which falsified the README's claim that every mutating entry
 // point funnels through one check.
 //
-// The rules are narrower than a normal write: the name must be the
-// reserved probe prefix, and the path must be inside a registered library
-// root OR a registered source root. A source root is permitted because the
-// only sound hardlink probe needs a real file on the source side; nothing
-// else may write there, and this creates exactly one file and removes it.
+// Three rules, all narrower than a normal write, and each one closes a
+// hole that was reintroduced after the first fix:
+//
+//  1. The name must carry the reserved probe prefix.
+//  2. The path's DIRECTORY must BE a registered root, not merely be
+//     contained by one. Containment alone let a caller probe
+//     path.Dir(firstFile) — a seeding torrent's own data directory —
+//     producing one write per orphan per scan and an unbounded cache.
+//  3. Dry-run refuses. The carve-out covers a user asking "can you
+//     hardlink?"; it does not cover a scheduled scan, and the dry-run gate
+//     belongs here rather than in one of the callers, because a second
+//     caller will not remember it.
 func (g *Guard) ProbeWrite(path string, fn func(realPath string) error) error {
 	base := filepath.Base(path)
 	if !strings.HasPrefix(base, ProbePrefix) {
@@ -96,12 +109,47 @@ func (g *Guard) ProbeWrite(path string, fn func(realPath string) error) error {
 	}
 
 	g.mu.RLock()
-	inRoot := g.inAnySource(clean(path)) || g.inAnyLibrary(clean(path))
+	dry := g.dryRun
+	dir := clean(filepath.Dir(path))
+	atRoot := false
+	for _, r := range g.sourceRoots {
+		if r == dir {
+			atRoot = true
+			break
+		}
+	}
+	if !atRoot {
+		for _, r := range g.libraryRoots {
+			if r == dir {
+				atRoot = true
+				break
+			}
+		}
+	}
 	g.mu.RUnlock()
-	if !inRoot {
-		return fmt.Errorf("%w: probe path %s", ErrOutsideLibrary, path)
+
+	if dry {
+		return fmt.Errorf("%w: capability probes do not run in dry-run", ErrDryRun)
+	}
+	if !atRoot {
+		return fmt.Errorf("%w: %s", ErrProbeNotAtRoot, path)
 	}
 	return fn(path)
+}
+
+// SourceRootFor returns the registered download root containing path, so a
+// caller can probe THE ROOT rather than an arbitrary directory beneath it.
+func (g *Guard) SourceRootFor(path string) (string, bool) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	p := clean(path)
+	best := ""
+	for _, r := range g.sourceRoots {
+		if underRoot(p, r) && len(r) > len(best) {
+			best = r
+		}
+	}
+	return best, best != ""
 }
 
 // ProbePrefix is the reserved filename prefix for capability probes.

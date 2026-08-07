@@ -38,7 +38,7 @@ func TestDA6_OverlapCollapseIsNotTransitive(t *testing.T) {
 		if claimed[i] {
 			continue
 		}
-		for _, peer := range ov.Transitive(i, cands) {
+		for _, peer := range ov.Transitive(i) {
 			claimed[peer] = true
 		}
 		planned = append(planned, i)

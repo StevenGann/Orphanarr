@@ -63,12 +63,16 @@ type ClientStatus struct {
 }
 
 type LibraryStatus struct {
-	Type       string `json:"type"`
-	Root       string `json:"root"`
-	Enabled    bool   `json:"enabled"`
-	Writable   bool   `json:"writable"`
-	FreeBytes  uint64 `json:"free_bytes"`
-	TotalBytes uint64 `json:"total_bytes"`
+	Type     string `json:"type"`
+	Root     string `json:"root"`
+	Enabled  bool   `json:"enabled"`
+	Writable bool   `json:"writable"`
+	// WritableKnown is false when no probe has run — in dry-run, nothing
+	// writes, so "not writable" would be a false negative rather than a
+	// finding.
+	WritableKnown bool   `json:"writable_known"`
+	FreeBytes     uint64 `json:"free_bytes"`
+	TotalBytes    uint64 `json:"total_bytes"`
 	// Hardlinks carries the three-way probe result, not a boolean:
 	// "copy only — source is on a read-only mount" is a distinct outcome
 	// from "copy only — separate mounts", and without it the remediation

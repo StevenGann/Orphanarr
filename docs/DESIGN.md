@@ -16,8 +16,8 @@
 >
 > Ratified is not finished. Every agent has approved *with reservations* at every vote, and the
 > reservations are applied in the changelog immediately following. **The document has now been
-> wrong about its own tallies five times**, which is why §0 tells you to trust the citations over
-> the counts — and why the verification scripts now print their own totals.
+> wrong about its own tallies six times**, which is why §0 tells you to trust the citations over
+> the counts — and why every count is now printed by a script rather than typed into prose.
 
 ### Amendment changelog — the four blocking answers, applied 2026-08-07
 
@@ -2545,20 +2545,22 @@ confidence enrichment, never as a hard dependency.**
 |---|---|---|
 | `tests/verification/fs_semantics_test.py` | 19 claims (`#C1`–`#C19`) about `link`/`rename`/`replace`/copy/`NAME_MAX`/permissions/reflink against two real filesystems. The regression net for every assertion in §6. **Triaged after the 2026-08-07 amendment: 7 become hardlink-conditional, 5 change role, 7 are unconditional, none becomes wrong.** | 19 checked, 0 refuted |
 | `tests/verification/bindmount_hardlink_test.sh` | Two bind mounts of one filesystem report identical `st_dev` **and** fail `link()`; a single shared mount succeeds. Unprivileged user+mount namespace — no Docker, no root. | 4 checked, 0 refuted |
-| `tests/verification/copy_semantics_test.py` | **15 claim IDs (`#C20`–`#C34`), 17 checks** — `#C23` and `#C24` each carry two. The copy path is no longer the fallback but the only path, so this covers what §6.5 now rests on: `chmod`-on-copy not touching the source (`#C21`), mode surviving the `link`+`unlink` publish (`#C26`), `chown` needing `CAP_CHOWN` (`#C23`), umask stripping the mode argument of both `open(2)` and `mkdir(2)` (`#C24`), setgid roots (`#C25`), `Bavail` vs `f_bfree` (`#C28`, **11.61 GiB** of root-reserved space), sparse inflation (`#C31`), a real `ENOSPC` mid-copy (`#C33`), `O_EXCL` on the partial (`#C34`), and the mutating-source class (`#C29`) that produced I13. | 16 checked, 0 refuted |
+| `tests/verification/copy_semantics_test.py` | **15 claim IDs (`#C20`–`#C34`), 17 checks** — `#C23` and `#C24` each carry two. The copy path is no longer the fallback but the only path, so this covers what §6.5 now rests on: `chmod`-on-copy not touching the source (`#C21`), mode surviving the `link`+`unlink` publish (`#C26`), `chown` needing `CAP_CHOWN` (`#C23`), umask stripping the mode argument of both `open(2)` and `mkdir(2)` (`#C24`), setgid roots (`#C25`), `Bavail` vs `f_bfree` (`#C28`, **11.61 GiB** of root-reserved space), sparse inflation (`#C31`), a real `ENOSPC` mid-copy (`#C33`), `O_EXCL` on the partial (`#C34`), and the mutating-source class (`#C29`) that produced I13. | 17 checked, 0 refuted |
 | `tests/verification/readonly_mount_test.sh` | 6 claims (`#R1`–`#R6`) on read-only bind mounts, unprivileged namespace, no Docker, no root. `:ro` blocks all 18 constructed write paths including `/proc/self/fd` re-open and `O_TMPFILE` (`#R1`) — but does **not** reach nested submounts (`#R4`), stop a symlink escaping (`#R3`), or survive a second writable mount of the same data (`#R6`); and it guarantees `EXDEV` (`#R2`). A non-recursive bind shows an **empty directory** where a disk of downloads lives (`#R5`). | 6 checked, 0 refuted |
 | `tests/verification/qbittorrent_contract_test.py` | Fixture fields all exist in `serialize_torrent.h`; the reference orphan predicate produces the documented outcome for 13 wire samples including every trap; `split(",")` on tags silently drops an exclusion tag. `--live` mode re-runs read-only against a real server. | PASS, 0 violations |
 | `tests/verification/corpus_lint.py` | The corpus is well-formed, IDs unique, every entry justifies itself, ≥25% negative expectations. | PASS — 118 entries, 27% negative |
 | `tests/corpus/*.jsonl` + `folder_shapes.json` + `qbittorrent_info_samples.json` | 118 cases, 14 tree shapes, 13 wire samples covering movies, TV, music, comics, ROMs, ebooks, audiobooks, ambiguous, and adversarial inputs. | Seeded; target ≥300 before v1 |
 
-**Totals: 44 distinct claim IDs / 45 checks across four filesystem and mount scripts, 0 refuted**
-(was 23 across two before the 2026-08-07 amendment).
+**Totals: 40 numbered claim IDs / 46 checks across four filesystem and mount scripts, 0 refuted.**
 
-> **Both of those numbers are correct, and stating only one is how this document got its tally
-> wrong for the fourth time.** `copy_semantics_test.py` defines 15 IDs and self-reports 16 checks.
-> The amendment draft said "45 claims"; three voters recomputed "44". They were counting IDs and it
-> was counting checks. §0's standing instruction — trust the citation beside a number, not the
-> number — applies to this table as much as to the agent tallies.
+> **This tally has now been wrong SIX times, including twice in the sentence written to stop it
+> being wrong.** "44 IDs" silently counted the bind-mount script's four *unnumbered* checks as
+> though they were IDs; the correction to "44 / 45" was itself wrong twice over.
+>
+> Stop writing the number down. **Every script prints its own count, and `corpus_lint.py` prints
+> the corpus figures.** Quote the output. §0's standing instruction — trust the citation beside a
+> number, not the number — applies to this table more than anywhere else in the document, because
+> this table is the one whose entire job is the number.
 
 **Two artifacts require re-pinning when §5.8 and §6.5 land:** `#C30` hard-asserts the old 18-byte
 suffix and 237-byte budget, which `.orphanarr-partial.tmp` changes to 22 and 233 — derive it as

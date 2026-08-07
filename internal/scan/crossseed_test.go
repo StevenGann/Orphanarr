@@ -84,7 +84,7 @@ func TestScanLoopPlansAMemberOfABlockedCrossSeedChain(t *testing.T) {
 		if blocked[i] {
 			continue
 		}
-		for _, peer := range ov.Transitive(i, candidates) {
+		for _, peer := range ov.Transitive(i) {
 			claimed[peer] = true
 		}
 		_ = c

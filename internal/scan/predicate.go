@@ -227,6 +227,12 @@ type Overlap struct {
 	pathsOf  map[int][]string
 	inodesOf map[int][][2]uint64
 	fpOf     map[int]string
+
+	// indexed remembers what was added, so the transitive closure needs no
+	// caller-supplied slice. Passing one invited the two legs to be closed
+	// over DIFFERENT sets, which is how the blocking leg ended up
+	// non-transitive while the collapse leg was.
+	indexed map[int]struct{}
 }
 
 func NewOverlap() *Overlap {
@@ -237,12 +243,14 @@ func NewOverlap() *Overlap {
 		pathsOf:       map[int][]string{},
 		inodesOf:      map[int][][2]uint64{},
 		fpOf:          map[int]string{},
+		indexed:       map[int]struct{}{},
 	}
 }
 
 // Add indexes one candidate. fs may be nil, in which case the inode leg is
 // skipped and only path and fingerprint are indexed.
 func (o *Overlap) Add(idx int, c Candidate, fs fsx.FS) {
+	o.indexed[idx] = struct{}{}
 	for _, p := range c.LocalPaths {
 		clean := path.Clean(p)
 		o.byPath[clean] = append(o.byPath[clean], idx)
@@ -291,7 +299,28 @@ func (o *Overlap) AddPeers(peers []Candidate, fs fsx.FS) map[int]bool {
 			mark(o.byFingerprint[pc.Fingerprint])
 		}
 	}
+
+	// Propagate transitively. A shares a fingerprint with B, and B shares a
+	// path with the categorised torrent: all three are one payload an *arr
+	// already owns, but marking only DIRECT overlaps leaves A plannable.
+	// The collapse leg got this closure and the blocking leg did not —
+	// which is the more dangerous half, because the collapse produces a
+	// duplicate entry and the block prevents a full second copy.
+	for _, idx := range keys(blocked) {
+		for _, peer := range o.Transitive(idx) {
+			blocked[peer] = true
+		}
+	}
 	return blocked
+}
+
+func keys(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // Transitive returns idx plus every candidate reachable from it through
@@ -300,7 +329,7 @@ func (o *Overlap) AddPeers(peers []Candidate, fs fsx.FS) map[int]bool {
 // Without the closure, A~B by fingerprint and B~C by path leaves C planned
 // separately for the same payload: the loop claims B and moves on before
 // ever asking what B overlaps.
-func (o *Overlap) Transitive(idx int, all []Candidate) []int {
+func (o *Overlap) Transitive(idx int) []int {
 	seen := map[int]bool{idx: true}
 	queue := []int{idx}
 	var out []int
@@ -308,10 +337,10 @@ func (o *Overlap) Transitive(idx int, all []Candidate) []int {
 	for len(queue) > 0 {
 		cur := queue[0]
 		queue = queue[1:]
-		if cur >= len(all) {
+		if _, ok := o.indexed[cur]; !ok {
 			continue
 		}
-		for _, peer := range o.Peers(cur, all[cur]) {
+		for _, peer := range o.peersOf(cur) {
 			if seen[peer] {
 				continue
 			}
@@ -332,7 +361,11 @@ func (o *Overlap) Transitive(idx int, all []Candidate) []int {
 // /mnt/user vs /mnt/disk1, mergerfs pool vs branch — has st_dev differing
 // BY CONSTRUCTION, so the path and inode legs fail together. Both are named
 // target platforms.
-func (o *Overlap) Peers(idx int, c Candidate) []int {
+// Peers returns the DIRECT overlaps of idx. The candidate argument is
+// unused and retained for call-site clarity.
+func (o *Overlap) Peers(idx int, _ Candidate) []int { return o.peersOf(idx) }
+
+func (o *Overlap) peersOf(idx int) []int {
 	seen := map[int]bool{}
 	add := func(list []int) {
 		for _, i := range list {
