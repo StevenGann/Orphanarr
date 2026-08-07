@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orphanarr</title>
+<style>
+  :root {
+    --bg: #16171b; --panel: #1e2027; --line: #2c2f38;
+    --fg: #e6e8ee; --muted: #9aa0ae; --accent: #6ea8fe;
+    --warn: #e8b34a; --bad: #e06c75; --good: #86c47a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9; --panel: #fff; --line: #dfe3ea;
+      --fg: #1c1f26; --muted: #5d6470; --accent: #2f6fd0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    padding: 6px 12px; border-radius: 7px; cursor: pointer; font: inherit;
+  }
+  nav button:hover { color: var(--fg); }
+  nav button.on { background: var(--bg); border-color: var(--line); color: var(--fg); }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  section { display: none; }
+  section.on { display: block; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+             color: var(--muted); margin: 0 0 12px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .stat { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .stat .n { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .05em; }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  .scroll { overflow-x: auto; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  button.action {
+    background: var(--accent); color: #fff; border: 0; border-radius: 7px;
+    padding: 8px 15px; font: inherit; font-weight: 550; cursor: pointer;
+  }
+  button.action:disabled { opacity: .5; cursor: default; }
+  .banner {
+    border-radius: 8px; padding: 11px 14px; margin-bottom: 16px;
+    border: 1px solid; display: flex; gap: 9px; align-items: flex-start;
+  }
+  .banner.dry  { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 11%, transparent); }
+  .banner.bad  { border-color: var(--bad);  background: color-mix(in srgb, var(--bad) 11%, transparent); }
+  .pill { border-radius: 999px; padding: 1px 9px; font-size: 12px; border: 1px solid var(--line); }
+  .pill.good { color: var(--good); border-color: var(--good); }
+  .pill.bad  { color: var(--bad);  border-color: var(--bad); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  label { display: block; margin-bottom: 12px; }
+  label span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  input[type=text], input[type=number], select {
+    width: 100%; background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; font: inherit;
+  }
+  input:disabled { opacity: .55; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 22px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Orphanarr <span id="ver"></span></h1>
+  <nav>
+    <button data-tab="dash" class="on">Dashboard</button>
+    <button data-tab="clients">Clients</button>
+    <button data-tab="libraries">Libraries</button>
+    <button data-tab="events">Events</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+
+<main>
+  <div id="banners"></div>
+
+  <section id="dash" class="on">
+    <div class="card">
+      <h2>Last scan</h2>
+      <div class="grid" id="scanstats">
+        <div class="stat"><div class="n">—</div><div class="l">Not scanned yet</div></div>
+      </div>
+      <p style="margin:14px 0 0"><button class="action" id="scanbtn">Scan now</button></p>
+    </div>
+    <div class="card">
+      <h2>Why isn't it doing anything?</h2>
+      <div class="scroll"><table id="skips">
+        <thead><tr><th>Reason</th><th class="num">Count</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="clients">
+    <div class="card">
+      <h2>Download clients</h2>
+      <div class="scroll"><table id="clienttbl">
+        <thead><tr><th>Name</th><th>Kind</th><th>Version</th><th>Status</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="muted" style="margin:12px 0 0">
+        A client that cannot express “this item has no category” is refused rather
+        than scanned. On a stock Deluge every torrent reads as uncategorised, which
+        would select the entire seeding library.
+      </p>
+    </div>
+  </section>
+
+  <section id="libraries">
+    <div class="card">
+      <h2>Libraries</h2>
+      <div class="scroll"><table id="libtbl">
+        <thead><tr><th>Type</th><th>Root</th><th class="num">Free</th><th>Placement</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="muted" style="margin:12px 0 0">
+        Placement is per (download root, library root) pair. A read-only download
+        mount enforces “never touch a source file” in the kernel but forecloses
+        hardlinking permanently — you can have one or the other.
+      </p>
+    </div>
+  </section>
+
+  <section id="events">
+    <div class="card">
+      <h2>Recent events</h2>
+      <div class="scroll"><table id="eventtbl">
+        <thead><tr><th>Time</th><th>Code</th><th>Message</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <section id="settings">
+    <div class="card">
+      <h2>Settings</h2>
+      <div id="settingsform"></div>
+      <button class="action" id="savebtn">Save</button>
+      <span id="savemsg" class="muted" style="margin-left:10px"></span>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// The API key travels in a query parameter so the page can be opened from a
+// bookmark. The server never logs query strings, which is why that is safe
+// enough for a LAN deployment and why it is documented rather than hidden.
+const KEY = new URLSearchParams(location.search).get("apikey") || "";
+
+async function api(path, opts) {
+  const o = Object.assign({headers: {}}, opts || {});
+  if (KEY) o.headers["X-Api-Key"] = KEY;
+  if (o.body) o.headers["Content-Type"] = "application/json";
+  const r = await fetch("/api/v1" + path, o);
+  const text = await r.text();
+  let body = {};
+  try { body = text ? JSON.parse(text) : {}; } catch (e) { body = {error: text}; }
+  if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+  return body;
+}
+
+const $ = (s) => document.querySelector(s);
+const el = (tag, txt, cls) => {
+  const n = document.createElement(tag);
+  if (txt !== undefined && txt !== null) n.textContent = String(txt);
+  if (cls) n.className = cls;
+  return n;
+};
+
+function bytes(n) {
+  if (!n) return "0 B";
+  const u = ["B","KiB","MiB","GiB","TiB","PiB"];
+  let i = 0; n = Number(n);
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + " " + u[i];
+}
+
+document.querySelectorAll("nav button").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("nav button").forEach((x) => x.classList.remove("on"));
+    document.querySelectorAll("section").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    $("#" + b.dataset.tab).classList.add("on");
+  };
+});
+
+function banner(cls, title, body) {
+  const d = el("div", null, "banner " + cls);
+  const wrap = el("div");
+  wrap.appendChild(el("strong", title));
+  if (body) { wrap.appendChild(document.createElement("br")); wrap.appendChild(el("span", body)); }
+  d.appendChild(wrap);
+  return d;
+}
+
+async function refresh() {
+  let st;
+  try {
+    st = await api("/system/status");
+  } catch (e) {
+    $("#banners").replaceChildren(banner("bad", "Cannot reach the API", e.message));
+    return;
+  }
+
+  $("#ver").textContent = st.version || "";
+
+  const bs = [];
+  if (st.dry_run) {
+    bs.push(banner("dry", "Dry run is ON.",
+      "Plans are produced and shown, and zero files are touched. This is the shipped " +
+      "default and stays on until you turn it off deliberately."));
+  }
+  (st.problems || []).forEach((p) => bs.push(banner("bad", "Configuration problem", p)));
+  $("#banners").replaceChildren(...bs);
+
+  // Clients
+  const ct = $("#clienttbl tbody");
+  ct.replaceChildren();
+  (st.clients || []).forEach((c) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", c.name));
+    tr.appendChild(el("td", c.kind));
+    tr.appendChild(el("td", c.app_version || "—"));
+    const td = el("td");
+    if (!c.reachable) td.appendChild(el("span", c.error || "unreachable", "pill bad"));
+    else if (!c.scannable) td.appendChild(el("span", c.refusal || "refused", "pill warn"));
+    else td.appendChild(el("span", "ok", "pill good"));
+    tr.appendChild(td);
+    ct.appendChild(tr);
+  });
+  if (!(st.clients || []).length) {
+    const tr = el("tr"); const td = el("td", "No clients configured.", "empty");
+    td.colSpan = 4; tr.appendChild(td); ct.appendChild(tr);
+  }
+
+  // Libraries
+  const lt = $("#libtbl tbody");
+  lt.replaceChildren();
+  (st.libraries || []).forEach((l) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", l.type));
+    const rootTd = el("td"); rootTd.appendChild(el("code", l.root)); tr.appendChild(rootTd);
+    tr.appendChild(el("td", bytes(l.free_bytes), "num"));
+    const p = el("td");
+    const cls = l.hardlinks === "available" ? "pill good" : "pill warn";
+    p.appendChild(el("span", l.hardlinks || "unknown", cls));
+    tr.appendChild(p);
+    lt.appendChild(tr);
+  });
+  if (!(st.libraries || []).length) {
+    const tr = el("tr"); const td = el("td", "No libraries configured.", "empty");
+    td.colSpan = 4; tr.appendChild(td); lt.appendChild(tr);
+  }
+
+  // Skip reasons
+  const sk = $("#skips tbody");
+  sk.replaceChildren();
+  const entries = Object.entries(st.skip_reasons || {}).sort((a, b) => b[1] - a[1]);
+  entries.forEach(([code, n]) => {
+    const tr = el("tr");
+    const c = el("td"); c.appendChild(el("code", code)); tr.appendChild(c);
+    tr.appendChild(el("td", n, "num"));
+    sk.appendChild(tr);
+  });
+  if (!entries.length) {
+    const tr = el("tr"); const td = el("td", "Nothing skipped yet.", "empty");
+    td.colSpan = 2; tr.appendChild(td); sk.appendChild(tr);
+  }
+
+  await loadEvents();
+  await loadSettings(st);
+}
+
+async function loadEvents() {
+  try {
+    const r = await api("/events");
+    const tb = $("#eventtbl tbody");
+    tb.replaceChildren();
+    (r.events || []).forEach((e) => {
+      const tr = el("tr");
+      tr.appendChild(el("td", (e.TS || "").replace("T", " ").slice(0, 19), "mono"));
+      const c = el("td"); c.appendChild(el("code", e.Code)); tr.appendChild(c);
+      tr.appendChild(el("td", e.Message || ""));
+      tb.appendChild(tr);
+    });
+    if (!(r.events || []).length) {
+      const tr = el("tr"); const td = el("td", "No events yet.", "empty");
+      td.colSpan = 3; tr.appendChild(td); tb.appendChild(tr);
+    }
+  } catch (e) { /* the banner already reports API failure */ }
+}
+
+let settingsCache = {};
+async function loadSettings() {
+  let r;
+  try { r = await api("/settings"); } catch (e) { return; }
+  settingsCache = r;
+  const form = $("#settingsform");
+  form.replaceChildren();
+
+  const fields = [
+    ["ops__dry_run", "Dry run", "select", ["true", "false"]],
+    ["ops__auto_file", "Auto-file above the confidence threshold", "select", ["false", "true"]],
+    ["ops__mode", "Placement mode", "select", ["copy", "link_or_copy", "link"]],
+    ["ops__collision", "Collision policy (there is no overwrite)", "select", ["skip", "suffix", "fail"]],
+    ["ops__client_write", "Mark filed items in the client", "select", ["tag", "none"]],
+    ["ops__max_plans_per_run", "Max plans per run", "number", null],
+    ["ops__reserve_bytes", "Reserve bytes (floor)", "number", null],
+    ["scan__interval_seconds", "Scan interval (seconds)", "number", null],
+    ["scan__settle_seconds", "Settle window (seconds)", "number", null],
+    ["detect__auto_threshold", "Auto-file threshold", "text", null],
+    ["detect__pdf_default", "PDF tie-break", "select", ["review", "ebook", "comic"]],
+  ];
+
+  fields.forEach(([key, label, kind, opts]) => {
+    const l = el("label");
+    l.appendChild(el("span", label));
+    let input;
+    if (kind === "select") {
+      input = document.createElement("select");
+      opts.forEach((o) => {
+        const op = el("option", o); op.value = o; input.appendChild(op);
+      });
+    } else {
+      input = document.createElement("input");
+      input.type = kind;
+    }
+    input.id = "set_" + key;
+    input.value = (r.settings && r.settings[key] !== undefined)
+      ? r.settings[key] : defaultFor(key, r.defaults);
+    if (r.read_only && r.read_only[key]) {
+      input.disabled = true;
+      l.appendChild(el("span", "pinned by an environment variable", "muted"));
+    }
+    l.appendChild(input);
+    form.appendChild(l);
+  });
+}
+
+function defaultFor(key, defaults) {
+  const map = {
+    ops__dry_run: defaults && defaults.DryRun, ops__auto_file: defaults && defaults.AutoFile,
+    ops__mode: defaults && defaults.Mode, ops__collision: defaults && defaults.Collision,
+    ops__client_write: defaults && defaults.ClientWrite,
+    ops__max_plans_per_run: defaults && defaults.MaxPlansPerRun,
+    ops__reserve_bytes: defaults && defaults.ReserveBytes,
+    detect__auto_threshold: defaults && defaults.AutoThreshold,
+    detect__pdf_default: defaults && defaults.PDFDefault,
+    scan__interval_seconds: 900, scan__settle_seconds: 300,
+  };
+  const v = map[key];
+  return v === undefined || v === null ? "" : String(v);
+}
+
+$("#savebtn").onclick = async () => {
+  const body = {};
+  document.querySelectorAll("[id^=set_]").forEach((i) => {
+    if (!i.disabled) body[i.id.slice(4)] = String(i.value);
+  });
+  try {
+    await api("/settings", {method: "PUT", body: JSON.stringify(body)});
+    $("#savemsg").textContent = "Saved. Restart to apply interval changes.";
+  } catch (e) {
+    $("#savemsg").textContent = "Failed: " + e.message;
+  }
+};
+
+$("#scanbtn").onclick = async () => {
+  const b = $("#scanbtn");
+  b.disabled = true; b.textContent = "Scanning…";
+  try {
+    const s = await api("/scan", {method: "POST"});
+    const g = $("#scanstats");
+    g.replaceChildren();
+    const stats = [
+      [s.items || 0, "Items seen"],
+      [s.orphans || 0, "Orphans found"],
+      [bytes(s.bytes || 0), "Orphan bytes"],
+      [Object.keys(s.skipped || {}).length, "Skip reasons"],
+    ];
+    stats.forEach(([n, l]) => {
+      const d = el("div", null, "stat");
+      d.appendChild(el("div", n, "n"));
+      d.appendChild(el("div", l, "l"));
+      g.appendChild(d);
+    });
+    await refresh();
+  } catch (e) {
+    $("#banners").prepend(banner("bad", "Scan failed", e.message));
+  } finally {
+    b.disabled = false; b.textContent = "Scan now";
+  }
+};
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+# Two topologies, and you pick ONE. They are mutually exclusive, and the
+# design says so with a verified test behind it (#R2).
+#
+# ---------------------------------------------------------------------------
+# A — one data mount. Keeps hardlinking available.
+# ---------------------------------------------------------------------------
+# Split /downloads and /media mounts make hardlinks impossible INSIDE the
+# container even when they are one filesystem outside it — and the st_dev
+# check everyone writes to detect that returns "fine". One mount, with the
+# download and library roots beneath it.
+
+services:
+  orphanarr:
+    image: ghcr.io/stevengann/orphanarr:latest
+    container_name: orphanarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=002
+      - TZ=America/Chicago
+    volumes:
+      - ./config:/config
+      - /mnt/pool:/data # ONE mount: /data/torrents AND /data/media below it
+    ports:
+      - "8790:8790"
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# B — read-only download mounts. Makes "never touch a source file" a KERNEL
+#     guarantee, and gives up hardlinking permanently.
+# ---------------------------------------------------------------------------
+# A :ro bind blocks every write path a program could take — all 18
+# constructed in #R1, including re-opening through /proc/self/fd and
+# O_TMPFILE. But a :ro bind is itself a separate vfsmount, so link(2)
+# returns EXDEV unconditionally (#R2), including when everything is on one
+# filesystem behind one -v. You cannot have both.
+#
+#   volumes:
+#     - ./config:/config
+#     - /mnt/pool/media:/data/media
+#     - /mnt/pool/torrents:/data/torrents:ro
+#     - /mnt/seedbox-b/torrents:/data/torrents-b:ro
+#
+# Under copy-only — which is the shipped default — topology B costs nothing
+# that is currently being used, and buys an invariant the kernel enforces
+# rather than one this program enforces on itself.
