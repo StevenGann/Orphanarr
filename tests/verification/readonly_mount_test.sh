@@ -35,6 +35,16 @@ fi
 # ~/.cache rather than /tmp so the backing filesystem supports user xattrs.
 export ORPHANARR_RO_BASE="${ORPHANARR_RO_BASE:-$HOME/.cache}"
 
+# The directory is not guaranteed to exist — a fresh CI runner has no
+# ~/.cache — and without it mktemp fails, the inner script carries on
+# against unwritable absolute paths, and the run reports a refutation that
+# is really an environment problem. A verification script that cries wolf
+# gets deleted, which is the outcome DESIGN §10.6 exists to prevent.
+if ! mkdir -p "$ORPHANARR_RO_BASE" 2>/dev/null; then
+    echo "SKIP: cannot create working directory $ORPHANARR_RO_BASE" >&2
+    exit 2
+fi
+
 unshare -Urm --propagation private bash -s <<'INNER'
 set -u
 fail=0
