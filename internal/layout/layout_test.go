@@ -212,9 +212,12 @@ func TestROMMultiDiscBecomesAFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The roms/ level is RomM's ROMS_FOLDER_NAME and is not optional: the
+	// configured root is RomM's LIBRARY_BASE_PATH, and without this level
+	// RomM finds nothing and bootstraps an empty roms/ directory instead.
 	for _, f := range res.Files {
-		if !strings.HasPrefix(f.Dst, "/roms/psx/Final Fantasy VII/") {
-			t.Errorf("multi-disc game must be a folder of files, got %q", f.Dst)
+		if !strings.HasPrefix(f.Dst, "/roms/roms/psx/Final Fantasy VII/") {
+			t.Errorf("multi-disc game must be a folder under roms/{platform}, got %q", f.Dst)
 		}
 	}
 }

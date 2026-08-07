@@ -35,9 +35,15 @@ type Orphan struct {
 	LastSeen  string `json:"last_seen_at"`
 }
 
-// UpsertOrphan records or refreshes a discovered orphan. first_seen_at is
-// preserved across scans because the settle window is measured from it —
-// resetting it on every poll would mean nothing ever settles.
+// UpsertOrphan records or refreshes a discovered orphan.
+//
+// Two columns are deliberately NOT in the update list. first_seen_at,
+// because the settle window is measured from it and resetting it on every
+// poll would mean nothing ever settles. And state, because it holds the
+// user's sticky decisions — `ignored` and `filed` — which a re-scan
+// recomputing "discovered" would silently undo every scan interval. The UI
+// promises "it will be skipped on future scans"; this is what makes that
+// true.
 func (d *DB) UpsertOrphan(ctx context.Context, o Orphan) (int64, error) {
 	raw := func(m json.RawMessage, def string) string {
 		if len(m) == 0 {
@@ -55,7 +61,7 @@ func (d *DB) UpsertOrphan(ctx context.Context, o Orphan) (int64, error) {
         ON CONFLICT(client_id, external_id) DO UPDATE SET
             name=excluded.name, save_path=excluded.save_path,
             fingerprint=excluded.fingerprint, size_bytes=excluded.size_bytes,
-            state=excluded.state, media_type=excluded.media_type,
+            media_type=excluded.media_type,
             score=excluded.score, parse_conf=excluded.parse_conf,
             cardinality=excluded.cardinality, reason=excluded.reason,
             signals_json=excluded.signals_json, parsed_json=excluded.parsed_json,
@@ -117,17 +123,48 @@ func (d *DB) ListOrphans(ctx context.Context, state string, limit int) ([]Orphan
 	return out, rows.Err()
 }
 
+// GetOrphan looks up by primary key.
+//
+// This used to list 1000 rows and scan them in Go, which returned
+// ErrNotFound for a perfectly valid id on any library with more than 1000
+// orphans — so /explain 404'd and markFiled silently failed AFTER a
+// successful execute. Data-dependent, invisible to every test, and it
+// appeared only on the large libraries this tool exists for.
 func (d *DB) GetOrphan(ctx context.Context, id int64) (Orphan, error) {
-	list, err := d.ListOrphans(ctx, "", 1000)
+	var o Orphan
+	var sig, parsed, files string
+	err := d.sql.QueryRowContext(ctx, `
+        SELECT o.id, o.client_id, COALESCE(c.name,''), o.external_id, o.name,
+               o.save_path, o.fingerprint, o.size_bytes, o.state, o.media_type,
+               o.score, o.parse_conf, o.cardinality, o.reason,
+               o.signals_json, o.parsed_json, o.files_json,
+               o.first_seen_at, o.last_seen_at
+        FROM orphan o LEFT JOIN client c ON c.id = o.client_id
+        WHERE o.id = ?`, id).Scan(&o.ID, &o.ClientID, &o.ClientName, &o.ExternalID,
+		&o.Name, &o.SavePath, &o.Fingerprint, &o.SizeBytes, &o.State, &o.MediaType,
+		&o.Score, &o.ParseConf, &o.Cardinality, &o.Reason,
+		&sig, &parsed, &files, &o.FirstSeen, &o.LastSeen)
 	if err != nil {
-		return Orphan{}, err
+		return Orphan{}, ErrNotFound
 	}
-	for _, o := range list {
-		if o.ID == id {
-			return o, nil
-		}
-	}
-	return Orphan{}, ErrNotFound
+	o.Signals = json.RawMessage(sig)
+	o.Parsed = json.RawMessage(parsed)
+	o.Files = json.RawMessage(files)
+	return o, nil
+}
+
+// OpenPlanFor returns an existing non-terminal plan for an orphan.
+//
+// savePlan always INSERTed, so at the 15-minute default a single unfiled
+// orphan accrued 96 duplicate draft plans a day and the review list — which
+// caps at 200 — filled with the same item.
+func (d *DB) OpenPlanFor(ctx context.Context, orphanID int64) (int64, bool) {
+	var id int64
+	err := d.sql.QueryRowContext(ctx, `
+        SELECT id FROM plan
+        WHERE orphan_id = ? AND status IN ('draft','blocked','failed')
+        ORDER BY id DESC LIMIT 1`, orphanID).Scan(&id)
+	return id, err == nil
 }
 
 // SetOrphanState records a sticky user decision (ignore, filed).
@@ -384,6 +421,28 @@ func (d *DB) InProgressSteps(ctx context.Context) ([]PlanStep, error) {
 	return out, rows.Err()
 }
 
+// IgnoredFingerprints are the sticky "ignore" decisions, keyed on content
+// rather than on an infohash — so re-adding the same payload under a new
+// hash, or from a different client, stays ignored.
+func (d *DB) IgnoredFingerprints(ctx context.Context) (map[string]bool, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT DISTINCT fingerprint FROM orphan WHERE state='ignored' AND fingerprint != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]bool{}
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, err
+		}
+		out[f] = true
+	}
+	return out, rows.Err()
+}
+
 // Counts powers the dashboard.
 func (d *DB) Counts(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
@@ -408,4 +467,18 @@ func (d *DB) Counts(ctx context.Context) (map[string]int, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// MarkStepInProgress records that a step is being attempted.
+//
+// It writes ONLY the status and destination. The general UpdateStepResult
+// writes created_by_us and created_dirs_json unconditionally, so using it
+// here cleared the undo record for every already-placed step of a retried
+// plan — making those files permanently unremovable, because rollback keys
+// on created_by_us.
+func (d *DB) MarkStepInProgress(ctx context.Context, planID int64, seq int, dst string) error {
+	_, err := d.sql.ExecContext(ctx,
+		`UPDATE plan_step SET status='in_progress', dst_path=? WHERE plan_id=? AND seq=?`,
+		dst, planID, seq)
+	return err
 }

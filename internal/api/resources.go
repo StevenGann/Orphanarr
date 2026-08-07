@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/StevenGann/Orphanarr/internal/config"
 	"github.com/StevenGann/Orphanarr/internal/store"
 )
 
@@ -15,6 +16,7 @@ import (
 // without a download client or a filesystem.
 type Manager interface {
 	Reload(ctx context.Context) error
+	ApplyConfig(ctx context.Context) (config.Config, error)
 	Execute(ctx context.Context, planID int64) error
 	Undo(ctx context.Context, planID int64) error
 	TestClient(ctx context.Context, c store.Client) (map[string]any, error)

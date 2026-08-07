@@ -24,7 +24,12 @@ type qbClient struct {
 
 	mu       sync.Mutex
 	loggedIn bool
-	caps     Capabilities
+	// failed latches a credential rejection. DESIGN §10.3: "Stop polling
+	// that client entirely. Never auto-retry credentials." Without it the
+	// scan loop retried a wrong password every interval, forever, walking
+	// straight into the IP ban the error message warns about.
+	failed bool
+	caps   Capabilities
 }
 
 func newQBittorrent(cfg Config) (DownloadClient, error) {
@@ -87,14 +92,30 @@ func (q *qbClient) do(ctx context.Context, method, path string, form url.Values)
 
 // login authenticates and stores the SID cookie.
 //
-// Success is 200 with an EMPTY body on 5.x, not the body "Ok." the wiki
-// documents, so authentication is judged on status code plus the presence
-// of the SID cookie. Failure is 401, not 403.
+// The contract DIFFERS BY VERSION and both halves must be handled:
+//
+//	<= 5.1.x   success -> 200 body "Ok."      failure -> 200 body "Fails."
+//	>= 5.2.0   success -> 200 empty body      failure -> 401
+//
+// Judging on status code alone — which is what the 5.2 contract invites —
+// makes a WRONG PASSWORD look like success on every 4.x and 5.0/5.1
+// instance. loggedIn is then set, every subsequent request 403s, and the
+// retry path re-logins on each one until WebUIMaxAuthFailCount (default 5)
+// triggers WebUIBanDuration (default 3600s). A typo would have banned the
+// user from their own qBittorrent for an hour, with an error naming
+// neither cause.
+//
+// So: read the body, and treat "Fails." as the failure it is.
 func (q *qbClient) login(ctx context.Context) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.loggedIn || q.cfg.APIKey != "" {
 		return nil
+	}
+	if q.failed {
+		return errors.New("qbittorrent: credentials were rejected earlier; " +
+			"fix them and save the client again. Retrying automatically would " +
+			"walk into WebUIMaxAuthFailCount's IP ban")
 	}
 	if q.cfg.Username == "" {
 		// Local-network bypass or an open WebUI: try unauthenticated.
@@ -108,19 +129,28 @@ func (q *qbClient) login(ctx context.Context) error {
 		return fmt.Errorf("qbittorrent: login: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body := strings.TrimSpace(string(raw))
 
 	switch resp.StatusCode {
 	case http.StatusOK:
+		// The <= 5.1 failure path. Empty body or "Ok." is success.
+		if strings.EqualFold(body, "Fails.") {
+			q.failed = true
+			return errors.New("qbittorrent: authentication failed: bad username or password " +
+				"(this server reports failures as 200 \"Fails.\", which is the pre-5.2 contract)")
+		}
 		q.loggedIn = true
 		return nil
 	case http.StatusForbidden:
 		// 403 on auth/login is the WebUIMaxAuthFailCount IP BAN, thrown
 		// only from validateCredentials() — a different condition from a
 		// wrong password, and one that retrying makes worse.
+		q.failed = true
 		return errors.New("qbittorrent: IP banned by WebUIMaxAuthFailCount; " +
 			"wait for the ban to expire or restart qBittorrent. Do not retry credentials")
 	case http.StatusUnauthorized:
+		q.failed = true
 		return errors.New("qbittorrent: authentication failed (401): bad username or password")
 	default:
 		return fmt.Errorf("qbittorrent: login returned %s", resp.Status)
@@ -253,7 +283,7 @@ var completeStates = map[string]bool{
 // change. progress == 1 is NOT sufficient on its own.
 var movingOrCheckingStates = map[string]bool{
 	"checkingUP": true, "checkingDL": true, "checkingResumeData": true,
-	"moving": true, "allocating": true, "metaDL": true, "forcedMetaDL": true,
+	"moving": true, "metaDL": true, "forcedMetaDL": true,
 }
 
 func (q *qbClient) ListItems(ctx context.Context) ([]Item, error) {
@@ -408,7 +438,21 @@ type cookieJar struct {
 func (j *cookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	j.cookies = append(j.cookies, cookies...)
+	// Replace by name. Appending stacked another SID on every re-login,
+	// so a long-lived client sent a growing list of stale session cookies.
+	for _, c := range cookies {
+		replaced := false
+		for i, existing := range j.cookies {
+			if existing.Name == c.Name {
+				j.cookies[i] = c
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			j.cookies = append(j.cookies, c)
+		}
+	}
 }
 
 func (j *cookieJar) Cookies(u *url.URL) []*http.Cookie {

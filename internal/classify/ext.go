@@ -43,6 +43,14 @@ var extFamily = map[string]family{}
 // installers, and .bin spans PS1 tracks, BIOS images and raw dumps. Both
 // appear in the corpus as traps precisely because guessing a platform from
 // them files someone's Linux ISO into a games library.
+// Every value is a RomM UniversalPlatformSlug. RomM matches the folder name
+// against that enum, so a slug that is merely plausible produces a platform
+// with no metadata and an info-level log — no error the user will ever see.
+//
+// Six of these were wrong until 2026-08-07, and one was a trap worth
+// naming: the .ngc EXTENSION is Neo Geo Pocket Color, while the SLUG "ngc"
+// is GameCube. The obvious correction of "ngpc" to "ngc" would file Neo Geo
+// Pocket games into a GameCube library.
 var romPlatform = map[string]string{
 	".sfc": "snes", ".smc": "snes",
 	".z64": "n64", ".n64": "n64", ".v64": "n64",
@@ -50,10 +58,10 @@ var romPlatform = map[string]string{
 	".gb": "gb", ".gbc": "gbc", ".gba": "gba",
 	".sms": "sms", ".gg": "gamegear",
 	".nds": "nds", ".3ds": "3ds",
-	".pce": "pcengine", ".32x": "sega32x",
-	".a26": "atari2600", ".a78": "atari7800", ".lnx": "atarilynx",
-	".ws": "wonderswan", ".wsc": "wonderswancolor",
-	".ngp": "ngp", ".ngc": "ngpc",
+	".pce": "tg16", ".32x": "sega32",
+	".a26": "atari2600", ".a78": "atari7800", ".lnx": "lynx",
+	".ws": "wonderswan", ".wsc": "wonderswan-color",
+	".ngp": "neo-geo-pocket", ".ngc": "neo-geo-pocket-color",
 	".vb": "virtualboy",
 }
 

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"time"
 
 	"github.com/StevenGann/Orphanarr/internal/client"
+	"github.com/StevenGann/Orphanarr/internal/config"
 	"github.com/StevenGann/Orphanarr/internal/exec"
 	"github.com/StevenGann/Orphanarr/internal/probe"
 	"github.com/StevenGann/Orphanarr/internal/store"
@@ -19,14 +21,28 @@ import (
 // nothing else; this is the only path from a plan to a file, and it refuses
 // before writing a byte rather than part-way through.
 func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
-	pl, err := p.db.GetPlan(ctx, planID)
+	// One execution at a time. DESIGN §2.5 specifies a single serialized
+	// executor; without this two POSTs both pass the status check and race
+	// on the same destinations, where the loser's cleanup unlinks the
+	// winner's partial.
+	p.execMu.Lock()
+	defer p.execMu.Unlock()
+
+	// Recovery and audit writes must survive the request being abandoned.
+	// A browser tab closed mid-copy used to cancel the copy AND every
+	// subsequent status write, leaving the plan stuck at "executing" with
+	// no error recorded — so the journal died in exactly the scenario it
+	// exists for.
+	rec := context.WithoutCancel(ctx)
+
+	pl, err := p.db.GetPlan(rec, planID)
 	if err != nil {
 		return err
 	}
 	if pl.Status == "done" {
 		return errors.New("plan has already been executed")
 	}
-	if p.cfg.DryRun {
+	if p.Config().DryRun {
 		// The guard would refuse anyway, but failing here gives the user a
 		// sentence about WHY rather than an errno from three layers down.
 		return errors.New("dry run is on: turn it off in Settings before executing a plan")
@@ -40,19 +56,7 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 		return fmt.Errorf("no library configured for %s", pl.MediaType)
 	}
 
-	steps := make([]exec.Step, 0, len(pl.Steps))
-	for _, s := range pl.Steps {
-		mt, _ := time.Parse(time.RFC3339Nano, s.SrcMtime)
-		steps = append(steps, exec.Step{
-			Seq: s.Seq, Src: s.SrcPath, Dst: s.DstPath,
-			Method:   exec.Method(s.Method),
-			Bytes:    s.Bytes,
-			SrcDev:   s.SrcDev,
-			SrcIno:   s.SrcIno,
-			SrcSize:  s.SrcSize,
-			SrcMtime: mt,
-		})
-	}
+	steps := toExecSteps(pl.Steps)
 
 	// The hardlink fast path is enabled per pair, only where the probe has
 	// actually passed. Never globally: an all-or-nothing switch forces
@@ -62,13 +66,18 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 		allowLink = true
 	}
 
+	cfg := p.Config()
 	opts := exec.DefaultOptions()
 	opts.AllowLink = allowLink
-	opts.Collision = p.cfg.Collision
-	opts.FileMode = 0o644
-	opts.DirMode = 0o755
-	opts.ReserveBytes = p.cfg.ReserveBytes
-	opts.ReserveFraction = p.cfg.ReserveFraction
+	opts.Collision = cfg.Collision
+	// From configuration, not hardcoded. These two keys were parsed,
+	// validated, rendered in the UI with help text and read by nothing —
+	// which is worse than an absent knob, because the UI implied they did
+	// something.
+	opts.FileMode = fs.FileMode(cfg.FileMode)
+	opts.DirMode = fs.FileMode(cfg.DirMode)
+	opts.ReserveBytes = cfg.ReserveBytes
+	opts.ReserveFraction = cfg.ReserveFraction
 
 	ex := exec.New(p.fs, newJournal(p.db, planID), opts)
 
@@ -76,20 +85,20 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 	// that fills someone's array at 3am and then cannot write its own
 	// database is a tool that gets uninstalled.
 	if err := ex.Preflight(steps, lib.Root); err != nil {
-		p.db.SetPlanStatus(ctx, planID, "blocked", err.Error())
+		p.db.SetPlanStatus(rec, planID, "blocked", err.Error())
 		code := "DISK_SPACE_BLOCKED"
 		if errors.Is(err, exec.ErrNoSpace) {
 			// keep the code
 		} else {
 			code = "SRC_UNREADABLE"
 		}
-		p.db.LogEvent(ctx, store.Event{
+		p.db.LogEvent(rec, store.Event{
 			Level: "warn", Code: code, PlanID: &planID, Message: err.Error(),
 		})
 		return err
 	}
 
-	p.db.SetPlanStatus(ctx, planID, "executing", "")
+	p.db.SetPlanStatus(rec, planID, "executing", "")
 	runErr := ex.Run(ctx, steps)
 
 	// Record what ACTUALLY happened, per step. method_actual differs from
@@ -101,7 +110,7 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 		if s.Status == "skipped" {
 			partial = true
 		}
-		p.db.UpdateStepResult(ctx, store.PlanStep{
+		p.db.UpdateStepResult(rec, store.PlanStep{
 			PlanID: planID, Seq: s.Seq, DstPath: s.Dst,
 			MethodActual: string(s.Actual),
 			CreatedByUs:  s.CreatedByUs,
@@ -112,8 +121,8 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 	}
 
 	if runErr != nil {
-		p.db.SetPlanStatus(ctx, planID, "failed", runErr.Error())
-		p.db.LogEvent(ctx, store.Event{
+		p.db.SetPlanStatus(rec, planID, "failed", runErr.Error())
+		p.db.LogEvent(rec, store.Event{
 			Level: "error", Code: "PLAN_FAILED", PlanID: &planID,
 			Message: runErr.Error(),
 		})
@@ -130,22 +139,22 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 		// state and must not be reported as completion.
 		status = "partial"
 	}
-	p.db.SetPlanStatus(ctx, planID, status, "")
-	p.db.SetOrphanState(ctx, pl.OrphanID, "filed")
+	p.db.SetPlanStatus(rec, planID, status, "")
+	p.db.SetOrphanState(rec, pl.OrphanID, "filed")
 
 	// Mark the item in the client, best effort. A marker failure NEVER
 	// fails a plan or triggers a rollback — the files are placed, and
 	// undoing that because a tag did not stick would be absurd.
-	if p.cfg.ClientWrite == "tag" {
-		if err := p.markFiled(ctx, pl.OrphanID); err != nil {
-			p.db.LogEvent(ctx, store.Event{
+	if cfg.ClientWrite == "tag" {
+		if err := p.markFiled(rec, pl.OrphanID); err != nil {
+			p.db.LogEvent(rec, store.Event{
 				Level: "warn", Code: "CLIENT_MARK_FAILED", PlanID: &planID,
 				Message: err.Error(),
 			})
 		}
 	}
 
-	p.db.LogEvent(ctx, store.Event{
+	p.db.LogEvent(rec, store.Event{
 		Code: "PLAN_EXECUTED", PlanID: &planID,
 		Message: fmt.Sprintf("%s: %d steps, %s", pl.OrphanName, len(steps),
 			humanBytes(pl.CopyBytes+pl.LinkBytes)),
@@ -159,7 +168,11 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 // filesystem to its exact pre-plan state — which is the whole reason the
 // design only ever adds.
 func (p *Pipeline) Undo(ctx context.Context, planID int64) error {
-	pl, err := p.db.GetPlan(ctx, planID)
+	p.execMu.Lock()
+	defer p.execMu.Unlock()
+
+	rec := context.WithoutCancel(ctx)
+	pl, err := p.db.GetPlan(rec, planID)
 	if err != nil {
 		return err
 	}
@@ -167,25 +180,22 @@ func (p *Pipeline) Undo(ctx context.Context, planID int64) error {
 		return fmt.Errorf("plan is %s; only an executed plan can be undone", pl.Status)
 	}
 
-	steps := make([]exec.Step, 0, len(pl.Steps))
-	for _, s := range pl.Steps {
-		steps = append(steps, exec.Step{
-			Seq: s.Seq, Src: s.SrcPath, Dst: s.DstPath,
-			CreatedByUs: s.CreatedByUs,
-			CreatedDirs: s.CreatedDirs,
-		})
-	}
+	// Carry the FULL identity, not just the paths. Rollback verifies the
+	// destination is still what we placed before unlinking it, and a step
+	// reconstructed without src_size gives it nothing to verify against —
+	// which it now correctly refuses rather than defaulting to a delete.
+	steps := toExecSteps(pl.Steps)
 
 	ex := exec.New(p.fs, nil, exec.DefaultOptions())
 	if errs := ex.Rollback(steps); len(errs) > 0 {
 		msg := fmt.Sprintf("%d of %d removals failed: %v", len(errs), len(steps), errs[0])
-		p.db.SetPlanStatus(ctx, planID, "undo_failed", msg)
+		p.db.SetPlanStatus(rec, planID, "undo_failed", msg)
 		return errors.New(msg)
 	}
 
-	p.db.SetPlanStatus(ctx, planID, "undone", "")
-	p.db.SetOrphanState(ctx, pl.OrphanID, "discovered")
-	p.db.LogEvent(ctx, store.Event{
+	p.db.SetPlanStatus(rec, planID, "undone", "")
+	p.db.SetOrphanState(rec, pl.OrphanID, "discovered")
+	p.db.LogEvent(rec, store.Event{
 		Code: "PLAN_UNDONE", PlanID: &planID,
 		Message: pl.OrphanName + ": removed what we created",
 	})
@@ -194,32 +204,26 @@ func (p *Pipeline) Undo(ctx context.Context, planID int64) error {
 
 // Reconcile repairs unclean exits before any new work runs.
 func (p *Pipeline) Reconcile(ctx context.Context) error {
-	rows, err := p.db.InProgressSteps(ctx)
+	rec := context.WithoutCancel(ctx)
+	rows, err := p.db.InProgressSteps(rec)
 	if err != nil || len(rows) == 0 {
 		return err
 	}
 
-	steps := make([]exec.Step, 0, len(rows))
-	for _, s := range rows {
-		steps = append(steps, exec.Step{
-			Seq: s.Seq, Src: s.SrcPath, Dst: s.DstPath,
-			SrcSize: s.SrcSize, Status: s.Status,
-			CreatedByUs: s.CreatedByUs, CreatedDirs: s.CreatedDirs,
-		})
-	}
+	steps := toExecSteps(rows)
 
 	ex := exec.New(p.fs, nil, exec.DefaultOptions())
 	errs := ex.Reconcile(steps)
 
 	for i, s := range steps {
-		p.db.UpdateStepResult(ctx, store.PlanStep{
+		p.db.UpdateStepResult(rec, store.PlanStep{
 			PlanID: rows[i].PlanID, Seq: s.Seq, DstPath: s.Dst,
 			MethodActual: string(s.Actual), CreatedByUs: s.CreatedByUs,
 			CreatedDirs: s.CreatedDirs, Status: s.Status,
 		})
 	}
 
-	p.db.LogEvent(ctx, store.Event{
+	p.db.LogEvent(rec, store.Event{
 		Code: "RECONCILED",
 		Message: fmt.Sprintf("repaired %d interrupted steps, %d errors",
 			len(steps), len(errs)),
@@ -246,6 +250,36 @@ func (p *Pipeline) markFiled(ctx context.Context, orphanID int64) error {
 	return errors.New("client no longer configured")
 }
 
+// toExecSteps is the ONE conversion from a stored step to an executable
+// one.
+//
+// There were four hand-written copies of this, each dropping a different
+// subset: Undo dropped SrcSize and SrcMtime, so Rollback had no identity to
+// verify; Reconcile dropped Method and Bytes. Every new field had to be
+// added in four places and forgetting one was silent. It is one function
+// now so that it cannot be.
+func toExecSteps(rows []store.PlanStep) []exec.Step {
+	out := make([]exec.Step, 0, len(rows))
+	for _, s := range rows {
+		mt, _ := time.Parse(time.RFC3339Nano, s.SrcMtime)
+		out = append(out, exec.Step{
+			Seq: s.Seq, Src: s.SrcPath, Dst: s.DstPath,
+			Method:      exec.Method(s.Method),
+			Actual:      exec.Method(s.MethodActual),
+			Bytes:       s.Bytes,
+			SrcDev:      s.SrcDev,
+			SrcIno:      s.SrcIno,
+			SrcSize:     s.SrcSize,
+			SrcMtime:    mt,
+			CreatedByUs: s.CreatedByUs,
+			CreatedDirs: s.CreatedDirs,
+			Status:      s.Status,
+			Err:         s.Error,
+		})
+	}
+	return out
+}
+
 // journal writes every mutation to the database before it is attempted and
 // again after it succeeds (I7).
 type journal struct {
@@ -258,12 +292,19 @@ func newJournal(db *store.DB, planID int64) *journal {
 }
 
 func (j *journal) Before(ctx context.Context, s *exec.Step) error {
-	return j.db.UpdateStepResult(ctx, store.PlanStep{
-		PlanID: j.planID, Seq: s.Seq, DstPath: s.Dst, Status: "in_progress",
-	})
+	// Status and destination only. Writing a zero PlanStep here cleared
+	// created_by_us and created_dirs_json on every step of a RETRIED plan,
+	// so the files placed by the first attempt became unremovable: rollback
+	// keys on created_by_us and would never see them again.
+	//
+	// Uses a cancellation-free context: this is the record of what we are
+	// about to do, and it must survive the request that triggered it being
+	// abandoned.
+	return j.db.MarkStepInProgress(context.WithoutCancel(ctx), j.planID, s.Seq, s.Dst)
 }
 
 func (j *journal) After(ctx context.Context, s *exec.Step) error {
+	ctx = context.WithoutCancel(ctx)
 	return j.db.UpdateStepResult(ctx, store.PlanStep{
 		PlanID: j.planID, Seq: s.Seq, DstPath: s.Dst,
 		MethodActual: string(s.Actual), CreatedByUs: s.CreatedByUs,
@@ -335,4 +376,25 @@ func (p *Pipeline) TestClient(ctx context.Context, c store.Client) (map[string]a
 	out["uncategorised_complete"] = complete
 	out["uncategorised_bytes"] = bytes
 	return out, nil
+}
+
+// ApplyConfig reloads settings from the database and installs them live.
+//
+// Without this every settings save was inert until a restart: both
+// SetConfig methods existed and neither had a caller, so a user turning
+// dry-run off and clicking Execute was still told "dry run is on".
+func (p *Pipeline) ApplyConfig(ctx context.Context) (config.Config, error) {
+	cfg, err := config.Load(ctx, p.db)
+	if err != nil {
+		return cfg, err
+	}
+	// Preserve the process-scoped values, which are not stored settings.
+	old := p.Config()
+	cfg.ConfigDir, cfg.Addr = old.ConfigDir, old.Addr
+	if cfg.APIKey == "" {
+		cfg.APIKey = old.APIKey
+	}
+
+	p.SetConfig(cfg)
+	return cfg, nil
 }

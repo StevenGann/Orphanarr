@@ -41,8 +41,9 @@ jobs:
 
       # -race matters: the scanner is concurrent across clients and shares a
       # store with the executor (DESIGN §11.2).
-      - name: go test -race
-        run: go test -race -count=1 ./...
+      # The job is named "coverage" and must actually measure it.
+      - name: go test -race -cover
+        run: go test -race -count=1 -cover ./...
 
       - name: Build static binary
         env:

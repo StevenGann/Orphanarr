@@ -14,7 +14,7 @@ func TestProbeSucceedsWithinOneFilesystem(t *testing.T) {
 	dst := filepath.Join(base, "media")
 	mustMkdir(t, src, dst)
 
-	got := New().Probe(src, dst)
+	got := newTestProber(t).Probe(src, dst)
 	if got.Outcome != Available {
 		t.Fatalf("outcome = %q (%s), want %q", got.Outcome, got.Detail, Available)
 	}
@@ -28,7 +28,7 @@ func TestProbeLeavesNoFilesBehind(t *testing.T) {
 	dst := filepath.Join(base, "m")
 	mustMkdir(t, src, dst)
 
-	New().Probe(src, dst)
+	newTestProber(t).Probe(src, dst)
 
 	for _, d := range []string{src, dst} {
 		entries, err := os.ReadDir(d)
@@ -59,7 +59,7 @@ func TestProbeRecoversFromALeftoverDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := New().Probe(src, dst); got.Outcome != Available {
+	if got := newTestProber(t).Probe(src, dst); got.Outcome != Available {
 		t.Fatalf("a leftover probe file made the pair look unlinkable: %q (%s)",
 			got.Outcome, got.Detail)
 	}
@@ -88,7 +88,7 @@ func TestResultsAreCachedPerPair(t *testing.T) {
 	dstB := filepath.Join(base, "b")
 	mustMkdir(t, src, dstA, dstB)
 
-	p := New()
+	p := newTestProber(t)
 	if _, ok := p.Get(src, dstA); ok {
 		t.Fatal("Get returned a result before any probe ran")
 	}
@@ -107,10 +107,10 @@ func TestResultsAreCachedPerPair(t *testing.T) {
 func TestWritableAndCaseProbesCleanUp(t *testing.T) {
 	dir := t.TempDir()
 
-	if ok, err := Writable(dir); err != nil || !ok {
+	if ok, err := newTestProber(t).Writable(dir); err != nil || !ok {
 		t.Fatalf("Writable = %v, %v", ok, err)
 	}
-	if _, err := CaseInsensitive(dir); err != nil {
+	if _, err := newTestProber(t).CaseInsensitive(dir); err != nil {
 		t.Fatalf("CaseInsensitive: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestWritableReportsAnUnwritableRoot(t *testing.T) {
 	}
 	defer os.Chmod(dir, 0o700)
 
-	if ok, _ := Writable(dir); ok {
+	if ok, _ := newTestProber(t).Writable(dir); ok {
 		t.Fatal("an unwritable root reported as writable")
 	}
 }

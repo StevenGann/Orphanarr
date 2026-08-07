@@ -24,13 +24,15 @@ Nobody imports them. Nobody cleans them up.
 This list is the point of the project, not a disclaimer.
 
 - **It never modifies, moves, deletes, renames, chmods or chowns a source file.** No config key
-  enables it. The rule is enforced by the filesystem port, not by discipline, and every mutating
-  entry point funnels through one check.
+  enables it. The rule is enforced by the filesystem port, not by discipline: every mutating entry
+  point funnels through one check, including the capability probe, which gets a narrow named
+  carve-out at that same chokepoint rather than an exemption from it.
 - **It never overwrites anything.** There is no overwrite collision policy — not as a default,
   not as an option. Publishing uses `link(2)`, which returns `EEXIST`, rather than `rename(2)`,
   which destroys an existing destination silently and with no error.
-- **It never guesses.** `unknown` is a first-class outcome with a machine-readable reason. Roughly
-  a fifth of the test corpus is expected to land there, and that is the design working.
+- **It never guesses.** `unknown` is a first-class outcome with a machine-readable reason. 17 of
+  the 94 classification cases in the corpus land there, and that is the design working — a
+  classifier that never refuses has simply moved its errors into your library.
 - **It does not extract archives, write tags, rewrite archives, or call out to TMDB/TVDB.**
 
 ## Install
@@ -76,7 +78,7 @@ edit something that will be overwritten.
 | Key | Default | Notes |
 |---|---|---|
 | `ORPHANARR__OPS__DRY_RUN` | `true` | Ships on. Stays on until you turn it off deliberately. |
-| `ORPHANARR__OPS__MODE` | `copy` | `copy`, `link_or_copy`, `link`. Upgrades per mount pair as the probe passes. |
+| `ORPHANARR__OPS__MODE` | `copy` | `copy`, `link_or_copy`, `link`. Anything but `copy` attempts a hardlink per (download root, library root) pair, but only where a real `link(2)` probe has passed. |
 | `ORPHANARR__OPS__COLLISION` | `skip` | `skip`, `suffix`, `fail`. There is no `overwrite`. |
 | `ORPHANARR__OPS__RESERVE_BYTES` | `10 GiB` | Floor; the effective reserve is `max(bytes, 5% of total)`. |
 | `ORPHANARR__DETECT__AUTO_THRESHOLD` | `0.85` | Below this, or on any ambiguity, the item goes to review. |
@@ -100,8 +102,10 @@ python3 tests/verification/corpus_lint.py        # corpus well-formedness
 checksums the source file before and after a full execute. Every package refuses to touch a
 source individually; that test proves the composition of all of them still does.
 
-`tests/verification/` holds 44 executable claims about filesystem and mount behaviour, run in CI
-against real filesystems and real mount namespaces. If a runner cannot provide what a script needs
+`tests/verification/` holds **40 numbered claims across four scripts, 46 checks in total**, run in
+CI against real filesystems and real mount namespaces. (The two counts differ because the
+bind-mount script's four checks are unnumbered and one numbered claim carries two assertions —
+each script prints its own total, which is the number to trust.) If a runner cannot provide what a script needs
 it exits 2 and CI records a visible warning — the skip is never silent, because a skipped mount
 test is how "equal `st_dev` means you can hardlink" would have survived into this codebase.
 
@@ -115,7 +119,7 @@ Two things there are worth reading even if you never touch the code:
 
 - **§0** — the findings the whole design turns on, including several the qBittorrent wiki still
   documents incorrectly, and a note telling you to trust the citations over the counts because
-  the document has been wrong about its own tallies three times.
+  the document has been wrong about its own tallies five times.
 - **Appendix A** — the folklore this design deliberately contradicts, each entry with its source.
 
 ## Licence

@@ -37,10 +37,75 @@ func clean(p string) string { return filepath.Clean(p) }
 // AddSourceRoot registers a download root. Nothing under it may ever be
 // mutated (I1).
 func (g *Guard) AddSourceRoot(root string) {
+	if strings.TrimSpace(root) == "" {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.sourceRoots = append(g.sourceRoots, clean(root))
+	r := clean(root)
+	for _, e := range g.sourceRoots {
+		if e == r {
+			return
+		}
+	}
+	g.sourceRoots = append(g.sourceRoots, r)
 }
+
+// SourceRoots returns the registered download roots.
+//
+// Exposed so the prober can key on a real configured root rather than on a
+// torrent's own subdirectory, which is both unbounded and a write into
+// someone's seeding data.
+func (g *Guard) SourceRoots() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return append([]string(nil), g.sourceRoots...)
+}
+
+// ResetLibraryRoots replaces the library set.
+//
+// Reload used to APPEND on every configuration save, so a library root the
+// user deleted — or corrected after a typo — stayed writable for the life
+// of the process, and the slice grew without bound. Source roots are
+// deliberately NOT reset here: forgetting a download root un-protects it,
+// and accumulating one only ever refuses more.
+func (g *Guard) ResetLibraryRoots() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.libraryRoots = nil
+}
+
+// ProbeWrite creates and removes a single named probe file.
+//
+// This is I10's carve-out, expressed AT the chokepoint rather than as an
+// end-run around it. The probe package previously used raw os.OpenFile, so
+// it was the one component writing to the filesystem without passing the
+// port — which falsified the README's claim that every mutating entry
+// point funnels through one check.
+//
+// The rules are narrower than a normal write: the name must be the
+// reserved probe prefix, and the path must be inside a registered library
+// root OR a registered source root. A source root is permitted because the
+// only sound hardlink probe needs a real file on the source side; nothing
+// else may write there, and this creates exactly one file and removes it.
+func (g *Guard) ProbeWrite(path string, fn func(realPath string) error) error {
+	base := filepath.Base(path)
+	if !strings.HasPrefix(base, ProbePrefix) {
+		return fmt.Errorf("fsx: %q is not a probe filename (must start with %q)",
+			base, ProbePrefix)
+	}
+
+	g.mu.RLock()
+	inRoot := g.inAnySource(clean(path)) || g.inAnyLibrary(clean(path))
+	g.mu.RUnlock()
+	if !inRoot {
+		return fmt.Errorf("%w: probe path %s", ErrOutsideLibrary, path)
+	}
+	return fn(path)
+}
+
+// ProbePrefix is the reserved filename prefix for capability probes.
+const ProbePrefix = ".orphanarr-probe"
 
 // AddLibraryRoot registers a destination root. Writes are permitted only
 // inside one of these (I6).

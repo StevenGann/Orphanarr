@@ -178,7 +178,16 @@ func (e *Executor) Run(ctx context.Context, steps []Step) error {
 			steps[i].Err = err.Error()
 			return err
 		}
-		steps[i].Status = "done"
+		// Only a step that actually placed something is done. runStep sets
+		// "skipped" for a collision routed to skip and returns nil;
+		// overwriting that unconditionally reported a plan in which EVERY
+		// file collided as complete, marked the orphan filed, and tagged
+		// the torrent orphanarr-filed — which the scanner excludes, so the
+		// item could never be re-detected. The `partial` plan state was
+		// dead code as a result.
+		if steps[i].Status == "in_progress" {
+			steps[i].Status = "done"
+		}
 	}
 	return nil
 }
@@ -353,6 +362,15 @@ func (e *Executor) publish(partial, dst string) error {
 }
 
 func (e *Executor) assertSourceUnchanged(s *Step) error {
+	// A step with no recorded identity cannot be verified, and every check
+	// below is conditional — so without this the whole of I13 degrades to
+	// a silent no-op for exactly the step whose plan-time stat failed.
+	// Refusing is the only honest outcome: we do not know what we copied.
+	if s.SrcIno == 0 && s.SrcSize == 0 && s.SrcMtime.IsZero() {
+		return fmt.Errorf("%w: no source identity was recorded at plan time, "+
+			"so this copy cannot be verified", ErrSourceChanged)
+	}
+
 	fi, err := e.fs.Stat(s.Src)
 	if err != nil {
 		return fmt.Errorf("%w: source vanished: %v", ErrSourceChanged, err)
@@ -362,6 +380,12 @@ func (e *Executor) assertSourceUnchanged(s *Step) error {
 	}
 	if s.SrcIno != 0 && fi.Ino != s.SrcIno {
 		return fmt.Errorf("%w: inode %d -> %d", ErrSourceChanged, s.SrcIno, fi.Ino)
+	}
+	// I13 names src_dev, and it is the leg that catches a source root
+	// remounted or replaced underneath a queued plan — the inode number
+	// alone can repeat across filesystems.
+	if s.SrcDev != 0 && fi.Dev != s.SrcDev {
+		return fmt.Errorf("%w: device %d -> %d", ErrSourceChanged, s.SrcDev, fi.Dev)
 	}
 	if !s.SrcMtime.IsZero() && !fi.ModTime.Equal(s.SrcMtime) {
 		return fmt.Errorf("%w: mtime %s -> %s", ErrSourceChanged,
@@ -398,11 +422,23 @@ func copyCtx(ctx context.Context, dst io.Writer, src io.Reader, bufSize int) (in
 	}
 }
 
+// ErrNotOurs means the file at a destination is not the one we placed, so
+// removing it would destroy something we did not create.
+var ErrNotOurs = errors.New("exec: destination no longer matches what we placed")
+
 // Rollback removes only what this run created, in reverse order, then
 // removes directories it created if and only if they are empty.
 //
 // Because sources are never deleted, a completed rollback returns the
-// filesystem to its exact pre-plan state.
+// filesystem to its exact pre-plan state — PROVIDED each destination is
+// still the file we put there. It is the only place in this program that
+// deletes inside a user's library, so it verifies identity first.
+//
+// DESIGN §6.7: "for a hardlink, confirm (dev, ino) still matches what was
+// recorded... For a copy, confirm size and mtime. Undo is disabled with a
+// stated reason where it cannot be proven safe." Undo is reachable from
+// History long after a plan ran, and a user who replaced a 720p file with
+// a 2160p remux in the interim must not lose the remux.
 func (e *Executor) Rollback(steps []Step) []error {
 	var errs []error
 	for i := len(steps) - 1; i >= 0; i-- {
@@ -410,8 +446,11 @@ func (e *Executor) Rollback(steps []Step) []error {
 		if !s.CreatedByUs {
 			continue
 		}
-		if err := e.fs.Remove(s.Dst); err != nil && !os.IsNotExist(err) {
+		if err := e.removeIfOurs(s); err != nil {
 			errs = append(errs, err)
+			// Do not remove the directories either: something we did not
+			// place is still inside them.
+			continue
 		}
 		for j := len(s.CreatedDirs) - 1; j >= 0; j-- {
 			if err := e.fs.RemoveDirIfEmpty(s.CreatedDirs[j]); err != nil && !os.IsNotExist(err) {
@@ -420,6 +459,48 @@ func (e *Executor) Rollback(steps []Step) []error {
 		}
 	}
 	return errs
+}
+
+// removeIfOurs deletes a destination only when it still matches what was
+// recorded for it.
+func (e *Executor) removeIfOurs(s Step) error {
+	fi, err := e.fs.Stat(s.Dst)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // already gone; nothing to undo
+		}
+		return err
+	}
+
+	// A hardlinked placement shares the source's inode, so identity is
+	// (dev, ino). A copy is a fresh inode, so identity is size + mtime —
+	// the same pair the design names.
+	if s.Actual == MethodLink && s.SrcIno != 0 {
+		if fi.Ino != s.SrcIno || fi.Dev != s.SrcDev {
+			return fmt.Errorf("%w: %s is inode %d:%d, expected %d:%d",
+				ErrNotOurs, s.Dst, fi.Dev, fi.Ino, s.SrcDev, s.SrcIno)
+		}
+		return e.fs.Remove(s.Dst)
+	}
+
+	// FAIL CLOSED when there is nothing to verify against.
+	//
+	// A caller that reconstructs steps without the recorded size — which
+	// is how Undo used to rebuild them from the database — would otherwise
+	// get an unconditional delete, which is precisely the unverified
+	// unlink this function exists to prevent. "Undo is disabled with a
+	// stated reason where it cannot be proven safe" (§6.7) means disabled,
+	// not defaulted to yes.
+	if s.SrcSize <= 0 {
+		return fmt.Errorf("%w: %s has no recorded size to verify against, "+
+			"so removing it cannot be proven safe", ErrNotOurs, s.Dst)
+	}
+	if fi.Size != s.SrcSize {
+		return fmt.Errorf("%w: %s is %d bytes, expected %d — it has been "+
+			"replaced or edited since Orphanarr placed it",
+			ErrNotOurs, s.Dst, fi.Size, s.SrcSize)
+	}
+	return e.fs.Remove(s.Dst)
 }
 
 // Reconcile repairs state after an unclean exit, before any new work.
@@ -435,14 +516,34 @@ func (e *Executor) Reconcile(steps []Step) []error {
 		switch {
 		case err == nil && (s.SrcSize == 0 || fi.Size == s.SrcSize):
 			s.Status = "done"
-		case err == nil:
-			// Exists but does not verify. We created it, so removing it is
-			// safe — and leaving a short file where a scanner will index
-			// it is not.
+
+		case err == nil && s.CreatedByUs:
+			// Exists, does not verify, and the journal says we created it.
+			// Removing it is safe, and leaving a short file where a
+			// scanner will index it is not.
 			if rmErr := e.fs.Remove(s.Dst); rmErr != nil {
 				errs = append(errs, rmErr)
 			}
 			s.Status = "pending"
+
+		case err == nil:
+			// Exists, does not verify, and we have NO record of creating
+			// it. This is reachable: a step whose collision was routed to
+			// skip is left at in_progress with dst_path pointing at the
+			// USER'S file, so a crash later in the same run brings us here
+			// with their file under the cursor.
+			//
+			// The old code deleted it, commented "We created it, so
+			// removing it is safe" — a precondition that was asserted and
+			// never checked. DESIGN §6.7: "if the step cannot be verified
+			// either way -> roll back and surface it. Never silently
+			// resume."
+			s.Status = "blocked"
+			s.Err = fmt.Sprintf("%s exists, does not match the recorded size, "+
+				"and is not recorded as created by Orphanarr; refusing to remove it",
+				s.Dst)
+			errs = append(errs, errors.New(s.Err))
+
 		default:
 			s.Status = "pending"
 		}

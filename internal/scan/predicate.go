@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,9 @@ type Exclusions struct {
 // Settings are the knobs the predicate reads.
 type Settings struct {
 	SettleWindow time.Duration
+	// LibraryRoots are the configured destinations. A torrent seeding from
+	// inside one of them is refused (I5).
+	LibraryRoots []string
 	Exclusions   Exclusions
 }
 
@@ -71,9 +75,14 @@ func Evaluate(c Candidate, s Settings, now time.Time) Decision {
 		return drop("SKIP_NO_CATEGORY_SUPPORT",
 			"client cannot express categories; it should have been refused at configure time (I14)")
 	}
-	if strings.TrimSpace(*it.Category) != "" {
-		// Whitespace is not empty. A category of " " is a category.
-		return drop("SKIP_CATEGORIZED", "category is "+*it.Category)
+	// Whitespace is NOT empty. qBittorrent's isValidCategoryName() accepts
+	// a single space — [^\\/] matches it — and createCategoryAction does
+	// not trim before validating. So " " is a real category a user can
+	// create, and TrimSpace here treated it as uncategorised and filed the
+	// torrent. The comment said one thing and the code did the other; the
+	// comment was right.
+	if *it.Category != "" {
+		return drop("SKIP_CATEGORIZED", "category is "+strconv.Quote(*it.Category))
 	}
 
 	// O2 — complete. The adapter folded the client's own rules into this.
@@ -98,7 +107,12 @@ func Evaluate(c Candidate, s Settings, now time.Time) Decision {
 		}
 	}
 	for _, p := range s.Exclusions.SavePaths {
-		if p != "" && strings.HasPrefix(path.Clean(it.SavePath), path.Clean(p)) {
+		// On a path BOUNDARY, not a bare prefix: excluding
+		// /data/torrents/tv must not also exclude
+		// /data/torrents/tvshows-keep. Over-exclusion fails safe, but a
+		// user who cannot tell which of their directories are covered
+		// cannot configure this at all.
+		if p != "" && underPath(it.SavePath, p) {
 			return drop("SKIP_EXCLUDED", "save path excluded by "+p)
 		}
 	}
@@ -129,6 +143,22 @@ func Evaluate(c Candidate, s Settings, now time.Time) Decision {
 		}
 	}
 
+	// I5/O9 — never process a torrent any of whose resolved paths lies
+	// inside a configured library root.
+	//
+	// The exposed population is anyone who previously imported by hardlink
+	// and now seeds from their library: filing it copies the payload back
+	// into the same library under a new name, and under copy-only that is
+	// a full duplicate of something already there.
+	for _, lp := range c.LocalPaths {
+		for _, root := range s.LibraryRoots {
+			if root != "" && underPath(lp, root) {
+				return drop("SEEDING_FROM_LIBRARY",
+					"a payload path is inside the library root "+root)
+			}
+		}
+	}
+
 	// O8 — every wanted file must resolve to a path this container can
 	// see. Unmapped means refuse, never guess (BRIEF §5 A3 keeps every
 	// client local, so an unmapped path is a misconfiguration).
@@ -137,6 +167,13 @@ func Evaluate(c Candidate, s Settings, now time.Time) Decision {
 	}
 
 	return keep()
+}
+
+// underPath reports whether p is root or lies beneath it, comparing whole
+// path components so that a shared prefix is not mistaken for containment.
+func underPath(p, root string) bool {
+	p, root = path.Clean(p), path.Clean(strings.TrimRight(root, "/"))
+	return p == root || strings.HasPrefix(p, root+"/")
 }
 
 // Fingerprint identifies content independently of path or infohash.
@@ -182,6 +219,13 @@ type Overlap struct {
 	byPath        map[string][]int
 	byInode       map[[2]uint64][]int
 	byFingerprint map[string][]int
+
+	// keysOf lets Peers find an index's own buckets directly. Scanning
+	// every inode bucket per call was O(candidates x indexed files) — about
+	// 8e9 iterations on a 40,000-torrent library.
+	pathsOf  map[int][]string
+	inodesOf map[int][][2]uint64
+	fpOf     map[int]string
 }
 
 func NewOverlap() *Overlap {
@@ -189,6 +233,9 @@ func NewOverlap() *Overlap {
 		byPath:        map[string][]int{},
 		byInode:       map[[2]uint64][]int{},
 		byFingerprint: map[string][]int{},
+		pathsOf:       map[int][]string{},
+		inodesOf:      map[int][][2]uint64{},
+		fpOf:          map[int]string{},
 	}
 }
 
@@ -198,17 +245,82 @@ func (o *Overlap) Add(idx int, c Candidate, fs fsx.FS) {
 	for _, p := range c.LocalPaths {
 		clean := path.Clean(p)
 		o.byPath[clean] = append(o.byPath[clean], idx)
+		o.pathsOf[idx] = append(o.pathsOf[idx], clean)
 
 		if fs != nil {
 			if fi, err := fs.Stat(clean); err == nil {
 				key := [2]uint64{fi.Dev, fi.Ino}
 				o.byInode[key] = append(o.byInode[key], idx)
+				o.inodesOf[idx] = append(o.inodesOf[idx], key)
 			}
 		}
 	}
 	if c.Fingerprint != "" {
 		o.byFingerprint[c.Fingerprint] = append(o.byFingerprint[c.Fingerprint], idx)
+		o.fpOf[idx] = c.Fingerprint
 	}
+}
+
+// AddPeers indexes candidates that are NOT themselves eligible — the
+// categorised torrents — and returns the set of candidate indexes that
+// overlap one.
+//
+// This is O10's first clause and §3.4 FP-1: one physical payload, two
+// torrents, one of them owned by an *arr. Filing the uncategorised half
+// produces a duplicate library entry and, under copy-only, a full second
+// copy of content already imported.
+func (o *Overlap) AddPeers(peers []Candidate, fs fsx.FS) map[int]bool {
+	blocked := map[int]bool{}
+	mark := func(list []int) {
+		for _, i := range list {
+			blocked[i] = true
+		}
+	}
+	for _, pc := range peers {
+		for _, p := range pc.LocalPaths {
+			clean := path.Clean(p)
+			mark(o.byPath[clean])
+			if fs != nil {
+				if fi, err := fs.Stat(clean); err == nil {
+					mark(o.byInode[[2]uint64{fi.Dev, fi.Ino}])
+				}
+			}
+		}
+		if pc.Fingerprint != "" {
+			mark(o.byFingerprint[pc.Fingerprint])
+		}
+	}
+	return blocked
+}
+
+// Transitive returns idx plus every candidate reachable from it through
+// any leg, following chains.
+//
+// Without the closure, A~B by fingerprint and B~C by path leaves C planned
+// separately for the same payload: the loop claims B and moves on before
+// ever asking what B overlaps.
+func (o *Overlap) Transitive(idx int, all []Candidate) []int {
+	seen := map[int]bool{idx: true}
+	queue := []int{idx}
+	var out []int
+
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur >= len(all) {
+			continue
+		}
+		for _, peer := range o.Peers(cur, all[cur]) {
+			if seen[peer] {
+				continue
+			}
+			seen[peer] = true
+			out = append(out, peer)
+			queue = append(queue, peer)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // Peers returns every other candidate index that shares a path, an inode or
@@ -228,20 +340,14 @@ func (o *Overlap) Peers(idx int, c Candidate) []int {
 			}
 		}
 	}
-	for _, p := range c.LocalPaths {
-		add(o.byPath[path.Clean(p)])
+	for _, p := range o.pathsOf[idx] {
+		add(o.byPath[p])
 	}
-	for key, list := range o.byInode {
-		_ = key
-		for _, i := range list {
-			if i == idx {
-				add(list)
-				break
-			}
-		}
+	for _, key := range o.inodesOf[idx] {
+		add(o.byInode[key])
 	}
-	if c.Fingerprint != "" {
-		add(o.byFingerprint[c.Fingerprint])
+	if fp := o.fpOf[idx]; fp != "" {
+		add(o.byFingerprint[fp])
 	}
 
 	out := make([]int, 0, len(seen))

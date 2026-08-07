@@ -122,9 +122,22 @@ func apply(c *Config, get lookup, ro map[string]bool) {
 		}
 	}
 	boolean := func(key string, dst *bool) {
-		if v, ok := get(key); ok {
-			*dst = v == "true" || v == "1" || v == "yes"
-			mark(ro, key)
+		v, ok := get(key)
+		if !ok {
+			return
+		}
+		mark(ro, key)
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes", "on":
+			*dst = true
+		case "false", "0", "no", "off":
+			*dst = false
+		default:
+			// An unrecognised value leaves the DEFAULT in place rather
+			// than resolving to false. The old parser resolved anything
+			// it did not recognise to false, so ORPHANARR__OPS__DRY_RUN=True
+			// silently DISABLED dry-run — a safety default that failed
+			// open on a capitalisation.
 		}
 	}
 	integer := func(key string, dst *int) {

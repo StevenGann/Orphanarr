@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StevenGann/Orphanarr/internal/config"
@@ -81,20 +82,27 @@ type LibraryStatus struct {
 
 // Server wires the routes.
 type Server struct {
-	db      *store.DB
-	cfg     config.Config
+	db *store.DB
+
+	// cfg is read by every request and written by a settings save, so it
+	// is mutex-guarded rather than assigned in place.
+	mu  sync.RWMutex
+	cfg config.Config
+
 	scanner Scanner
 	mgr     Manager
 	version string
 }
 
+func (s *Server) config() config.Config {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg
+}
+
 func New(db *store.DB, cfg config.Config, sc Scanner, mgr Manager, version string) *Server {
 	return &Server{db: db, cfg: cfg, scanner: sc, mgr: mgr, version: version}
 }
-
-// SetConfig updates the live config so a settings save takes effect for
-// subsequent requests — including the API key and the dry-run banner.
-func (s *Server) SetConfig(c config.Config) { s.cfg = c }
 
 // NewAPIKey generates a key. Shown once, at first run.
 func NewAPIKey() string {
@@ -131,7 +139,8 @@ func (s *Server) Handler() http.Handler {
 // program is remote arbitrary file write by design.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.APIKey == "" {
+		cfg := s.config()
+		if cfg.APIKey == "" {
 			// No key configured yet: first run, before the wizard has set
 			// one. Allow, because otherwise the user cannot reach the UI
 			// that sets it.
@@ -144,7 +153,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 		}
 		// Constant time: a timing oracle on an API key is a real leak even
 		// on a LAN.
-		if subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.APIKey)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(cfg.APIKey)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or missing X-Api-Key"})
 			return
 		}
@@ -155,11 +164,11 @@ func (s *Server) auth(next http.Handler) http.Handler {
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.scanner.Status(r.Context())
 	st.Version = s.version
-	st.DryRun = s.cfg.DryRun
+	st.DryRun = s.config().DryRun
 	if counts, err := s.db.SkipReasonCounts(r.Context()); err == nil {
 		st.SkipReasons = counts
 	}
-	st.Problems = append(st.Problems, s.cfg.Validate()...)
+	st.Problems = append(st.Problems, s.config().Validate()...)
 	if counts, err := s.db.Counts(r.Context()); err == nil {
 		st.Counts = counts
 	}
@@ -174,7 +183,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":  all,
-		"read_only": s.cfg.ReadOnly,
+		"read_only": s.config().ReadOnly,
 		"defaults":  config.Defaults(),
 	})
 }
@@ -186,7 +195,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for k, v := range body {
-		if s.cfg.ReadOnly[k] {
+		if s.config().ReadOnly[k] {
 			writeJSON(w, http.StatusConflict, map[string]string{
 				"error": k + " is pinned by an environment variable and cannot be edited here",
 			})
@@ -195,6 +204,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.SetSetting(r.Context(), k, v); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+	}
+	// Apply immediately. Both SetConfig methods existed and neither had a
+	// caller, so every settings save was inert until a restart — including
+	// dry-run, which meant turning it off and clicking Execute still
+	// returned "dry run is on".
+	if s.mgr != nil {
+		if cfg, err := s.mgr.ApplyConfig(r.Context()); err == nil {
+			s.mu.Lock()
+			s.cfg = cfg
+			s.mu.Unlock()
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})

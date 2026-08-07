@@ -254,9 +254,17 @@ func IsSampleOrExtra(relPath string) bool {
 	lower := strings.ToLower(relPath)
 	for _, seg := range strings.Split(lower, "/") {
 		switch seg {
+		// Jellyfin documents 13 external-extras folders; Plex's set
+		// overlaps but is not identical, so this is the UNION. "clips",
+		// "theme-music" and "backdrops" were missing, and their absence
+		// was not cosmetic: a file literally named theme.mp3 is
+		// Jellyfin's theme-media convention and renaming it kills it,
+		// while a renamed clip with no version label reads to Jellyfin
+		// as a SEPARATE MOVIE.
 		case "sample", "samples", "extras", "featurettes", "trailers",
 			"behind the scenes", "deleted scenes", "interviews", "scenes",
-			"shorts", "other", "proof":
+			"shorts", "other", "proof", "clips", "theme-music", "backdrops",
+			"specials", "extrafanart", "extrathumbs":
 			return true
 		}
 	}

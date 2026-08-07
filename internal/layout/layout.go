@@ -9,9 +9,11 @@ package layout
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/StevenGann/Orphanarr/internal/classify/release"
 	"github.com/StevenGann/Orphanarr/internal/media"
 )
 
@@ -205,15 +207,35 @@ func buildTV(p media.Parsed, files []media.SourceFile, lib Library, res *Result)
 	}
 
 	series := titleYear(p)
-	season := fmt.Sprintf("Season %02d", p.Season)
 
 	var out []PlannedFile
 	for _, f := range files {
-		marker := episodeMarker(p)
-		stem := series
-		if marker != "" {
-			stem = fmt.Sprintf("%s - %s", p.Title, marker)
+		// EACH FILE is parsed for its own season and episode.
+		//
+		// A season pack carries one name for the torrent and a different
+		// episode in every file. Applying the torrent-level parse to all of
+		// them emitted the same destination for all 10 episodes — and with
+		// the default skip collision policy, 9 were silently dropped and
+		// the survivor was numbered E00, which matches nothing in any
+		// agent's table. DESIGN §5.2: "Season packs produce one step per
+		// episode file... We never silently drop a file from a plan."
+		ep := episodeFor(p, f)
+		if ep.Season < 0 {
+			// No episode number is derivable. A date-based episode still
+			// has a usable name — Plex accepts "Show - 2024-03-14" — so a
+			// plan is built and flagged for review rather than refused.
+			// Anything else has nothing to file under, and emitting E00
+			// would invent an episode that exists in no agent's table.
+			if p.AirDate == "" {
+				res.NeedsReview = true
+				res.ReviewReason = "no episode number could be derived for " + path.Base(f.RelPath)
+				return nil, fmt.Errorf("layout: no episode number for %s", f.RelPath)
+			}
+			ep = episode{Season: 0, Marker: p.AirDate}
 		}
+
+		season := fmt.Sprintf("Season %02d", ep.Season)
+		stem := fmt.Sprintf("%s - %s", p.Title, ep.Marker)
 		name, tw := TruncateComponent(stem, f.Ext, "", lib.Opts)
 		rel, abs, w, err := join(lib, series, season, name)
 		if err != nil {
@@ -224,14 +246,40 @@ func buildTV(p media.Parsed, files []media.SourceFile, lib Library, res *Result)
 	return out, nil
 }
 
-func episodeMarker(p media.Parsed) string {
-	if p.Episode == 0 && p.EpisodeEnd == 0 && p.Season == 0 {
-		return ""
+// episode is one file's resolved position. Season is -1 when unresolvable.
+type episode struct {
+	Season int
+	Marker string
+}
+
+// episodeFor resolves a single file, preferring the file's own name and
+// falling back to the torrent-level parse for a single-episode payload.
+func episodeFor(p media.Parsed, f media.SourceFile) episode {
+	base := strings.TrimSuffix(path.Base(f.RelPath), f.Ext)
+	if info := release.Parse(base); info.IsTV && info.HasSeason && len(info.Episodes) > 0 {
+		return episode{Season: info.Season, Marker: marker(info.Season, info.Episodes)}
 	}
-	if p.EpisodeEnd > p.Episode {
-		return fmt.Sprintf("S%02dE%02d-E%02d", p.Season, p.Episode, p.EpisodeEnd)
+
+	// The file name carried nothing. Fall back to the torrent-level parse,
+	// but ONLY when it names a specific episode: a season-pack parse has a
+	// season and no episode, and using it here is what produced E00.
+	if p.Episode > 0 || (p.Season > 0 && p.EpisodeEnd > 0) {
+		eps := []int{p.Episode}
+		if p.EpisodeEnd > p.Episode {
+			for e := p.Episode + 1; e <= p.EpisodeEnd; e++ {
+				eps = append(eps, e)
+			}
+		}
+		return episode{Season: p.Season, Marker: marker(p.Season, eps)}
 	}
-	return fmt.Sprintf("S%02dE%02d", p.Season, p.Episode)
+	return episode{Season: -1}
+}
+
+func marker(season int, eps []int) string {
+	if len(eps) > 1 {
+		return fmt.Sprintf("S%02dE%02d-E%02d", season, eps[0], eps[len(eps)-1])
+	}
+	return fmt.Sprintf("S%02dE%02d", season, eps[0])
 }
 
 // buildVerbatim places files under one folder without renaming any of them.
@@ -253,7 +301,7 @@ func buildVerbatim(p media.Parsed, files []media.SourceFile, lib Library, folder
 	var out []PlannedFile
 	for _, f := range files {
 		parts := strings.Split(folder, "/")
-		parts = append(parts, strings.Split(f.RelPath, "/")...)
+		parts = append(parts, payloadTail(f.RelPath, keepDiscDirs)...)
 		rel, abs, w, err := join(lib, parts...)
 		if err != nil {
 			return nil, err
@@ -262,6 +310,40 @@ func buildVerbatim(p media.Parsed, files []media.SourceFile, lib Library, folder
 	}
 	return out, nil
 }
+
+// payloadTail returns the part of a source path that may be carried into
+// the destination.
+//
+// Audiobookshelf groups at the deepest directory that DIRECTLY contains a
+// media file, with exactly one exception: a single trailing directory
+// matching /^(cd|dis[ck])\s*\d{1,3}$/i (server/utils/scandir.js). So the
+// torrent's own subtree cannot be appended wholesale — every extra level
+// shifts ABS's author/series/title slots by one, which mislabels the book
+// rather than hiding it.
+//
+// keepDiscDirs preserves that one exception, because both ABS and
+// Navidrome rely on it for multi-disc releases.
+func payloadTail(rel string, keep func(string) bool) []string {
+	segs := strings.Split(rel, "/")
+	if len(segs) <= 1 {
+		return segs
+	}
+	name := segs[len(segs)-1]
+	// Walk backwards from the file, keeping only trailing disc directories.
+	var kept []string
+	for i := len(segs) - 2; i >= 0; i-- {
+		if keep(segs[i]) {
+			kept = append([]string{segs[i]}, kept...)
+			continue
+		}
+		break
+	}
+	return append(kept, name)
+}
+
+var reDiscDir = regexp.MustCompile(`(?i)^(cd|dis[ck])\s*\d{1,3}$`)
+
+func keepDiscDirs(seg string) bool { return reDiscDir.MatchString(seg) }
 
 func musicFolder(p media.Parsed) string {
 	artist := p.Artist
@@ -410,7 +492,12 @@ func buildROM(p media.Parsed, files []media.SourceFile, lib Library) ([]PlannedF
 		base := path.Base(f.RelPath)
 		name, tw := TruncateComponent(strings.TrimSuffix(base, f.Ext), f.Ext, "", lib.Opts)
 
-		parts := []string{p.Platform}
+		// RomM's library is {base}/roms/{platform}/, never
+		// {base}/{platform}/. ROMS_FOLDER_NAME defaults to "roms" and
+		// get_platform_fs_structure() builds "roms/{slug}"; without that
+		// level RomM finds nothing, bootstraps an empty roms/ directory
+		// and logs a warning the user never sees.
+		parts := []string{romsDir, p.Platform}
 		if multi {
 			parts = append(parts, p.Title)
 		}
@@ -424,6 +511,10 @@ func buildROM(p media.Parsed, files []media.SourceFile, lib Library) ([]PlannedF
 	}
 	return out, nil
 }
+
+// romsDir is RomM's ROMS_FOLDER_NAME default. The library root the user
+// configures is RomM's LIBRARY_BASE_PATH, and this level sits beneath it.
+const romsDir = "roms"
 
 func largest(files []media.SourceFile) media.SourceFile {
 	var best media.SourceFile

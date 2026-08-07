@@ -221,22 +221,54 @@ func TestReconcileSweepsPartialEvenWhenDestinationVerifies(t *testing.T) {
 	}
 }
 
-// A destination that does not verify is removed and the step re-queued.
-// Leaving a short file where a scanner indexes it is the failure this
-// prevents.
-func TestReconcileRemovesUnverifiableDestination(t *testing.T) {
+// A destination that does not verify AND that the journal says we created
+// is removed, and the step re-queued. Leaving a short file where a scanner
+// indexes it is the failure this prevents.
+//
+// CreatedByUs is set explicitly here. The original version of this test
+// left it at its zero value and still asserted the file was deleted, which
+// pinned a real bug in place: Reconcile would delete a destination it had
+// no record of creating. A fixture's zero values are part of its
+// preconditions, and an unset one is where a missing check hides.
+func TestReconcileRemovesUnverifiableDestinationWeCreated(t *testing.T) {
 	e, _, lib := newExec(t)
 	dst := filepath.Join(lib, "short.mkv")
 	writeFile(t, dst, "12")
 
-	steps := []Step{{Dst: dst, SrcSize: 100, Status: "in_progress"}}
+	steps := []Step{{Dst: dst, SrcSize: 100, Status: "in_progress", CreatedByUs: true}}
 	e.Reconcile(steps)
 
 	if steps[0].Status != "pending" {
 		t.Errorf("status = %q, want pending", steps[0].Status)
 	}
 	if _, err := os.Stat(dst); !os.IsNotExist(err) {
-		t.Error("an unverifiable destination was left in the library")
+		t.Error("an unverifiable destination we created was left in the library")
+	}
+}
+
+// The converse, and the one that matters. A step routed to skip stays at
+// in_progress with dst_path pointing at the USER'S file; a crash later in
+// the same run brings Reconcile here. It must refuse.
+func TestReconcileRefusesToRemoveAFileWeDidNotCreate(t *testing.T) {
+	e, _, lib := newExec(t)
+	dst := filepath.Join(lib, "users-own-file.mkv")
+	writeFile(t, dst, "THE USER PUT THIS HERE")
+
+	steps := []Step{{Dst: dst, SrcSize: 100, Status: "in_progress", CreatedByUs: false}}
+	errs := e.Reconcile(steps)
+
+	if len(errs) == 0 {
+		t.Error("refusing to delete an unrecorded file must be surfaced, not silent")
+	}
+	if steps[0].Status != "blocked" {
+		t.Errorf("status = %q, want blocked", steps[0].Status)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("Reconcile deleted a file it had no record of creating: %v", err)
+	}
+	if string(got) != "THE USER PUT THIS HERE" {
+		t.Fatalf("the user's file was modified: %q", got)
 	}
 }
 

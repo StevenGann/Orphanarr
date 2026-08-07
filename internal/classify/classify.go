@@ -147,6 +147,12 @@ func Classify(fs media.FileSet, r Rules) (media.Classification, media.Parsed) {
 	c.Runner, c.RunnerScore = runner, runnerScore
 	c.Cardinality = cardinality(fs, counts, info)
 
+	// Type-specific fields are recovered only after the type is known,
+	// because the same token means different things per type. Without this
+	// the layout engine receives eight zero-valued fields and files five of
+	// the seven media types to the wrong place.
+	enrich(&parsed, c.Type, fs, info)
+
 	switch {
 	case best == media.Unknown || bestScore < r.ReviewThreshold:
 		c.Type = media.Unknown

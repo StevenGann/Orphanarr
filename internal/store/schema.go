@@ -60,7 +60,11 @@ CREATE TABLE IF NOT EXISTS library (
 
 CREATE TABLE IF NOT EXISTS orphan (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_id      INTEGER NOT NULL REFERENCES client(id) ON DELETE CASCADE,
+    -- RESTRICT, not CASCADE. Deleting a client used to silently destroy
+    -- every orphan, plan and plan_step belonging to it — i.e. the entire
+    -- undo history — at exactly the moment a user is most likely to want
+    -- it. The API detaches orphans instead, so history survives.
+    client_id      INTEGER REFERENCES client(id) ON DELETE SET NULL,
     -- external_id is OPAQUE. qBittorrent's happens to be an infohash;
     -- SABnzbd and NZBGet have none at all.
     external_id    TEXT NOT NULL,
@@ -94,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_orphan_fingerprint ON orphan(fingerprint);
 
 CREATE TABLE IF NOT EXISTS plan (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    orphan_id    INTEGER NOT NULL REFERENCES orphan(id) ON DELETE CASCADE,
+    orphan_id    INTEGER REFERENCES orphan(id) ON DELETE SET NULL,
     media_type   TEXT NOT NULL,
     library_id   INTEGER REFERENCES library(id),
     status       TEXT NOT NULL DEFAULT 'draft',

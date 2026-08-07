@@ -48,14 +48,23 @@ type Pipeline struct {
 	mu      sync.RWMutex
 	clients []*ClientEntry
 	libs    []layout.Library
-	first   map[string]time.Time
+
+	// Cached library writability, refreshed by Reload. Never computed on a
+	// status request.
+	writable map[string]bool
+
+	// One scan at a time, and one execution at a time. DESIGN §2.5
+	// specifies a single serialized executor; without these the periodic
+	// ticker and POST /api/v1/scan can run concurrently, and two
+	// executions of one plan race on the same destinations.
+	scanMu sync.Mutex
+	execMu sync.Mutex
 }
 
 func New(db *store.DB, g *fsx.Guard, cfg config.Config) *Pipeline {
 	return &Pipeline{
 		db: db, fs: g, guard: g, cfg: cfg,
-		prober: probe.New(),
-		first:  map[string]time.Time{},
+		prober: probe.New(g),
 	}
 }
 
@@ -115,8 +124,19 @@ func (p *Pipeline) Reload(ctx context.Context) error {
 		if len(rules) > 0 {
 			mapper = pathmap.New(rules)
 		}
+		// Under IDENTITY mapping there are no rules to register, and that
+		// is the documented common deployment — so the guard held ZERO
+		// source roots and I1's check could never fire, in exactly the
+		// configuration the README recommends. Every save path the client
+		// reports is registered instead, at scan time (registerSourceRoots
+		// below), and any root the user did name is registered here.
 		entries = append(entries, &ClientEntry{Cfg: cfg, Client: impl, Mapper: mapper})
 	}
+
+	// Library roots are REPLACED, not appended. Appending left a root the
+	// user deleted, or corrected after a typo, writable for the life of
+	// the process.
+	p.guard.ResetLibraryRoots()
 
 	var libs []layout.Library
 	for _, l := range dbLibs {
@@ -153,24 +173,38 @@ func (p *Pipeline) Reload(ctx context.Context) error {
 // probeAllPairs runs a real link(2) for every (download root, library root)
 // combination. st_dev is never the gate: it reports "fine" in exactly the
 // two-bind-mount layout that fails.
+// probeAllPairs runs a real link(2) for every (download root, library root)
+// pair, and caches library writability.
+//
+// Three rules, each of which was wrong before:
+//
+//   - It is keyed on a REGISTERED SOURCE ROOT, never on a torrent's own
+//     subdirectory. Probing path.Dir(firstFile) wrote a file inside every
+//     seeding torrent's data directory, one per orphan per scan, and made
+//     the cache unbounded.
+//   - It is called only from Reload — which is startup or a configuration
+//     save, i.e. user-initiated, which is what I10's carve-out actually
+//     permits. It was previously called from inside the scan loop, so a
+//     scheduled scan wrote probe files with dry-run engaged.
+//   - It skips entirely in dry-run. The carve-out covers a user asking
+//     "can you hardlink?"; it does not cover background polling.
 func (p *Pipeline) probeAllPairs(ctx context.Context) {
 	p.mu.RLock()
-	entries := append([]*ClientEntry(nil), p.clients...)
 	libs := append([]layout.Library(nil), p.libs...)
+	dry := p.cfg.DryRun
 	p.mu.RUnlock()
 
-	srcRoots := map[string]bool{}
-	for _, e := range entries {
-		if e.Mapper == nil {
+	srcRoots := p.guard.SourceRoots()
+
+	writable := map[string]bool{}
+	for _, l := range libs {
+		if dry {
 			continue
 		}
-		for _, r := range e.Mapper.Rules() {
-			srcRoots[r.Local] = true
-		}
-	}
+		ok, _ := p.prober.Writable(l.Root)
+		writable[l.Root] = ok
 
-	for src := range srcRoots {
-		for _, l := range libs {
+		for _, src := range srcRoots {
 			res := p.prober.Probe(src, l.Root)
 			if res.Outcome != probe.Available {
 				p.db.LogEvent(ctx, store.Event{
@@ -180,6 +214,10 @@ func (p *Pipeline) probeAllPairs(ctx context.Context) {
 			}
 		}
 	}
+
+	p.mu.Lock()
+	p.writable = writable
+	p.mu.Unlock()
 }
 
 func (p *Pipeline) libraryForName(t string) (layout.Library, bool) {
@@ -252,6 +290,9 @@ func (p *Pipeline) libraryFor(t media.Type) (layout.Library, bool) {
 // filesystem: execution is a separate, explicitly-approved step, and
 // dry-run is on by default anyway.
 func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
+	p.scanMu.Lock()
+	defer p.scanMu.Unlock()
+
 	sum := api.Summary{
 		Skipped:    map[string]int{},
 		Classified: map[string]int{},
@@ -259,19 +300,30 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 
 	p.mu.RLock()
 	clients := append([]*ClientEntry(nil), p.clients...)
+	libRoots := make([]string, 0, len(p.libs))
+	for _, l := range p.libs {
+		libRoots = append(libRoots, l.Root)
+	}
+	cfg := p.cfg
 	p.mu.RUnlock()
 
+	// Sticky ignores are keyed on the content fingerprint, so they survive
+	// the same payload being re-added under a different infohash.
+	ignored, _ := p.db.IgnoredFingerprints(ctx)
+
 	settings := scan.Settings{
-		SettleWindow: p.cfg.SettleWindow,
+		SettleWindow: cfg.SettleWindow,
+		LibraryRoots: libRoots,
 		Exclusions: scan.Exclusions{
-			Tags: []string{"orphanarr-ignore", "orphanarr-filed"},
+			Tags:         []string{"orphanarr-ignore", "orphanarr-filed"},
+			Fingerprints: ignored,
 		},
 	}
 	rules := classify.DefaultRules()
-	rules.AutoThreshold = p.cfg.AutoThreshold
-	rules.ReviewThreshold = p.cfg.ReviewThresh
-	rules.AmbiguityMargin = p.cfg.Ambiguity
-	switch p.cfg.PDFDefault {
+	rules.AutoThreshold = cfg.AutoThreshold
+	rules.ReviewThreshold = cfg.ReviewThresh
+	rules.AmbiguityMargin = cfg.Ambiguity
+	switch cfg.PDFDefault {
 	case "ebook":
 		rules.PDFDefault = media.Ebook
 	case "comic":
@@ -282,6 +334,7 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 
 	now := time.Now()
 	var candidates []scan.Candidate
+	var categorisedPeers []scan.Candidate
 
 	for _, e := range clients {
 		if !e.Scannable {
@@ -302,11 +355,8 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 		sum.Items += len(items)
 
 		for _, it := range items {
-			// Cheap rejections before spending a request on the manifest.
-			if it.Category != nil && strings.TrimSpace(*it.Category) != "" {
-				sum.Skipped["SKIP_CATEGORIZED"]++
-				continue
-			}
+			categorised := it.Category != nil && strings.TrimSpace(*it.Category) != ""
+
 			if !it.Complete {
 				sum.Skipped["SKIP_INCOMPLETE"]++
 				continue
@@ -318,21 +368,44 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 				continue
 			}
 
-			key := e.Cfg.Name + "/" + string(it.ID)
-			p.mu.Lock()
-			seen, ok := p.first[key]
+			// The settle window is measured from the PERSISTED
+			// first_seen_at, not an in-memory map. An in-memory map resets
+			// on every restart, so a container in a restart loop means
+			// nothing ever settles — and completion_on is -1 on migrated
+			// clients, which is exactly the population this column exists
+			// for.
+			seen, ok := p.db.FirstSeen(ctx, e.Cfg.ID, string(it.ID))
 			if !ok {
 				seen = now
-				p.first[key] = seen
 			}
-			p.mu.Unlock()
 
 			localPaths, _ := scan.ResolveLocal(e.Mapper, it, files)
+
+			// Register the resolved save path as a source root. This is
+			// what arms I1 under identity mapping: the guard now refuses
+			// every mutation beneath a directory a client actually
+			// reported, whether or not the user configured a mapping.
+			if base, err := e.Mapper.ToLocal(it.SavePath); err == nil {
+				p.guard.AddSourceRoot(base)
+			}
 			c := scan.Candidate{
 				Client: e.Client, Item: it, Files: files,
 				LocalPaths:  localPaths,
 				Fingerprint: scan.Fingerprint(files),
 				FirstSeen:   seen,
+			}
+
+			// A CATEGORISED item is not a candidate, but its paths must
+			// still enter the overlap index — that is the entire point of
+			// fetching filter=all. O10 requires "no resolved path overlaps
+			// a categorized torrent on any client", and it is §3.4 FP-1:
+			// Sonarr grabbing as tv-sonarr while the user's cross-seed of
+			// the identical content carries no category. Dropping these
+			// before the index left that class completely unguarded.
+			if categorised {
+				categorisedPeers = append(categorisedPeers, c)
+				sum.Skipped["SKIP_CATEGORIZED"]++
+				continue
 			}
 
 			d := scan.Evaluate(c, settings, now)
@@ -344,22 +417,37 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 		}
 	}
 
-	// The cross-seed gate. Built over every candidate from every client,
-	// because a cross-seed is by definition the same bytes reached twice.
+	// The cross-seed gate, over BOTH populations. A cross-seed is by
+	// definition the same bytes reached twice, and the dangerous case is
+	// the pairing of an uncategorised copy with a categorised one.
 	ov := scan.NewOverlap()
 	for i, c := range candidates {
 		ov.Add(i, c, p.fs)
 	}
+	blocked := ov.AddPeers(categorisedPeers, p.fs)
 
 	claimed := map[int]bool{}
+	plansMade := 0
 	for i, c := range candidates {
 		if claimed[i] {
 			continue
 		}
-		for _, peer := range ov.Peers(i, c) {
-			// Overlaps among uncategorised candidates COLLAPSE into one
-			// unit of work rather than producing two library entries
-			// pointing at one payload (I4).
+		if blocked[i] {
+			// An \*arr already owns this payload. Filing it would produce a
+			// duplicate library entry and, under copy-only, a full second
+			// copy of content that is already imported.
+			sum.Skipped["CROSS_SEED_BLOCKED"]++
+			p.db.LogEvent(ctx, store.Event{
+				Level: "warn", Code: "CROSS_SEED_BLOCKED",
+				Message: c.Item.Name + ": overlaps a categorised torrent on a configured client",
+			})
+			continue
+		}
+		// Overlaps among uncategorised candidates COLLAPSE into one unit
+		// of work rather than producing two library entries pointing at
+		// one payload (I4). Transitively: claim the peers' peers too, or a
+		// chain A~B~C leaves C planned separately.
+		for _, peer := range ov.Transitive(i, candidates) {
 			claimed[peer] = true
 			sum.Skipped["SKIP_OVERLAP_COLLAPSED"]++
 		}
@@ -408,13 +496,6 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			sum.Skipped["SKIP_NO_LIBRARY"]++
 			continue
 		}
-		// Probe this pair now, lazily. Reload cannot do it under identity
-		// path-mapping: there are no rules to enumerate, and the source
-		// root is only known once a scan has read a real save path.
-		if len(fs.Files) > 0 && fs.Files[0].AbsPath != "" {
-			p.prober.EnsureProbed(path.Dir(fs.Files[0].AbsPath), lib.Root)
-		}
-
 		res, err := layout.Build(cl.Type, parsed, fs.Files, lib)
 		if err != nil {
 			p.db.LogEvent(ctx, store.Event{
@@ -455,12 +536,22 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			}
 		}
 
-		planID, err := p.savePlan(ctx, orphanID, cl.Type, res, needsReview, reason)
+		// max_plans_per_run is a real cap, not a validated-and-ignored
+		// setting. It is byte-blind — 25 plans can be 25 GB or 25 TB — so
+		// the free-space preflight is what actually bounds the damage; this
+		// bounds how much a misconfiguration can queue up in one pass.
+		if cfg.MaxPlansPerRun > 0 && plansMade >= cfg.MaxPlansPerRun {
+			sum.Skipped["SKIP_PLAN_LIMIT"]++
+			continue
+		}
+
+		planID, err := p.savePlan(ctx, orphanID, cl.Type, res, needsReview, reason, lib)
 		if err != nil {
 			sum.Errors = append(sum.Errors, err.Error())
 			continue
 		}
 
+		plansMade++
 		code := "PLAN_READY"
 		if needsReview {
 			code = "PLAN_NEEDS_REVIEW"
@@ -469,6 +560,17 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			Code: code, OrphanID: &orphanID, PlanID: &planID,
 			Message: fmt.Sprintf("%s -> %s (%d files) %s",
 				c.Item.Name, cl.Type, len(res.Files), reason),
+		})
+	}
+
+	// The dashboard's "why isn't it doing anything" panel is built from the
+	// event vocabulary, and no SKIP_* code was ever logged — so the panel
+	// was structurally always empty, which is the one question §9 says it
+	// exists to answer.
+	for code, n := range sum.Skipped {
+		p.db.LogEvent(ctx, store.Event{
+			Code:    code,
+			Message: fmt.Sprintf("%d item(s) this scan", n),
 		})
 	}
 
@@ -487,13 +589,40 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 // for hours or days by design, which is exactly the window in which a
 // source can change.
 func (p *Pipeline) savePlan(ctx context.Context, orphanID int64, t media.Type,
-	res layout.Result, needsReview bool, reason string) (int64, error) {
+	res layout.Result, needsReview bool, reason string, lib layout.Library) (int64, error) {
 
 	layout.SortPlanned(res.Files)
 
 	pl := store.Plan{
 		OrphanID: orphanID, MediaType: string(t), Status: "draft",
 		NeedsReview: needsReview, ReviewReason: reason,
+	}
+	// Reuse an open plan for this orphan instead of minting a new one on
+	// every scan: at the 15-minute default that was 96 duplicate drafts a
+	// day for a single unfiled item, in a review list that caps at 200.
+	if existing, ok := p.db.OpenPlanFor(ctx, orphanID); ok {
+		pl.ID = existing
+	}
+
+	// The method is decided HERE, from the configured mode and the
+	// per-pair probe. It used to be hardcoded to "copy", which made
+	// ops__mode, Options.AllowLink, the probe's Available outcome and the
+	// whole three-valued badge inert — the machinery shipped and the wire
+	// did not.
+	method := "copy"
+	if p.Config().Mode != "copy" {
+		src := ""
+		for _, f := range res.Files {
+			if !f.Skip && f.Src.AbsPath != "" {
+				src = path.Dir(f.Src.AbsPath)
+				break
+			}
+		}
+		if src != "" {
+			if r := p.prober.EnsureProbed(src, lib.Root); r.Outcome == probe.Available {
+				method = "hardlink"
+			}
+		}
 	}
 	warns := make([]string, 0, len(res.Warnings))
 	for _, w := range res.Warnings {
@@ -508,19 +637,28 @@ func (p *Pipeline) savePlan(ctx context.Context, orphanID int64, t media.Type,
 		}
 		step := store.PlanStep{
 			Seq: seq, SrcPath: f.Src.AbsPath, DstPath: f.Dst,
-			Method: "copy", Bytes: f.Src.Size, SrcSize: f.Src.Size,
+			Method: method, Bytes: f.Src.Size, SrcSize: f.Src.Size,
 			Status: "pending",
 		}
 		if step.SrcPath == "" {
 			step.SrcPath = f.Src.RelPath
 		}
-		if fi, err := p.fs.Stat(step.SrcPath); err == nil {
-			step.SrcDev, step.SrcIno = fi.Dev, fi.Ino
-			step.SrcSize, step.Bytes = fi.Size, fi.Size
-			step.SrcMtime = fi.ModTime.UTC().Format(time.RFC3339Nano)
+		// A step with no recorded identity cannot be verified before
+		// publish, so I13 would degrade to a silent no-op for exactly this
+		// step. Fail the plan instead.
+		fi, err := p.fs.Stat(step.SrcPath)
+		if err != nil {
+			return 0, fmt.Errorf("cannot stat source %s: %w", step.SrcPath, err)
 		}
+		step.SrcDev, step.SrcIno = fi.Dev, fi.Ino
+		step.SrcSize, step.Bytes = fi.Size, fi.Size
+		step.SrcMtime = fi.ModTime.UTC().Format(time.RFC3339Nano)
 		pl.Steps = append(pl.Steps, step)
-		pl.CopyBytes += step.Bytes
+		if method == "hardlink" {
+			pl.LinkBytes += step.Bytes
+		} else {
+			pl.CopyBytes += step.Bytes
+		}
 		seq++
 	}
 
@@ -590,6 +728,10 @@ func (p *Pipeline) Status(ctx context.Context) api.Status {
 	libs := append([]layout.Library(nil), p.libs...)
 	p.mu.RUnlock()
 
+	p.mu.RLock()
+	writable := p.writable
+	p.mu.RUnlock()
+
 	st := api.Status{Settings: map[string]string{}}
 	for _, e := range clients {
 		cs := api.ClientStatus{
@@ -610,8 +752,10 @@ func (p *Pipeline) Status(ctx context.Context) api.Status {
 			ls.FreeBytes = info.Avail
 			ls.TotalBytes = info.Total
 		}
-		ok, _ := probe.Writable(l.Root)
-		ls.Writable = ok
+		// Read the cached value. Probing here wrote a file into every
+		// library root on every /system/status request — and the UI polls
+		// that every 30 seconds, forever, in dry-run too.
+		ls.Writable = writable[l.Root]
 
 		// Reported as three outcomes, not a boolean. Without the
 		// read-only case the remediation banner tells a user running :ro

@@ -12,6 +12,7 @@
 package probe
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,12 +55,50 @@ type Result struct {
 // Per pair, not global: §3.5 and §6.3 both model it that way, and an
 // all-or-nothing switch would force copies onto provably linkable pairs —
 // spending the one resource that never comes back, for no safety.
+// Writer is the narrow slice of the filesystem port a probe needs.
+//
+// The probe takes it rather than calling os directly, so that the one
+// component that legitimately writes into a download root does so THROUGH
+// the guard. Before this, probe was the single package that could mutate
+// the filesystem without passing the chokepoint — and the README's
+// headline claim was false because of it.
+type Writer interface {
+	ProbeWrite(path string, fn func(realPath string) error) error
+}
+
 type Prober struct {
 	mu    sync.RWMutex
 	cache map[string]Result
+	w     Writer
 }
 
-func New() *Prober { return &Prober{cache: map[string]Result{}} }
+func New(w Writer) *Prober { return &Prober{cache: map[string]Result{}, w: w} }
+
+// probeFile names every file this package creates. The guard refuses any
+// other name through ProbeWrite.
+func probeFile(dir, suffix string) string {
+	return filepath.Join(dir, ".orphanarr-probe-"+suffix)
+}
+
+func (p *Prober) create(path string, perm os.FileMode) error {
+	if p.w == nil {
+		return errors.New("probe: no filesystem port configured")
+	}
+	return p.w.ProbeWrite(path, func(real string) error {
+		f, err := os.OpenFile(real, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
+}
+
+func (p *Prober) remove(path string) {
+	if p.w == nil {
+		return
+	}
+	_ = p.w.ProbeWrite(path, func(real string) error { return os.Remove(real) })
+}
 
 func key(src, dst string) string { return src + "\x00" + dst }
 
@@ -128,14 +167,14 @@ func (p *Prober) EnsureProbed(srcRoot, dstRoot string) Result {
 // the dry-run rule. The carve-out is why the probe is a named method rather
 // than something the executor does implicitly.
 func (p *Prober) Probe(srcRoot, dstRoot string) Result {
-	res := probePair(srcRoot, dstRoot)
+	res := p.probePair(srcRoot, dstRoot)
 	p.mu.Lock()
 	p.cache[key(srcRoot, dstRoot)] = res
 	p.mu.Unlock()
 	return res
 }
 
-func probePair(srcRoot, dstRoot string) Result {
+func (p *Prober) probePair(srcRoot, dstRoot string) Result {
 	var res Result
 
 	if st, err := statDev(srcRoot); err == nil {
@@ -158,22 +197,22 @@ func probePair(srcRoot, dstRoot string) Result {
 		return res
 	}
 
-	src := filepath.Join(srcRoot, ".orphanarr-probe-src")
-	dst := filepath.Join(dstRoot, ".orphanarr-probe-dst")
+	src := probeFile(srcRoot, "src")
+	dst := probeFile(dstRoot, "dst")
 
-	f, err := os.OpenFile(src, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
+	if err := p.create(src, 0o600); err != nil {
 		res.Outcome = SeparateMnt
 		res.Detail = "could not create a probe file in the download root: " + err.Error()
 		return res
 	}
-	f.Close()
-	defer os.Remove(src)
+	defer p.remove(src)
 
-	os.Remove(dst) // a leftover from an interrupted probe would give EEXIST
-	err = os.Link(src, dst)
+	// A leftover from an interrupted probe would give EEXIST forever,
+	// reading as "cannot hardlink" on a pair that can.
+	p.remove(dst)
+	err := os.Link(src, dst)
 	if err == nil {
-		os.Remove(dst)
+		p.remove(dst)
 		res.Outcome = Available
 		return res
 	}
@@ -247,28 +286,24 @@ func errnoOf(err error) string {
 // different question from whether it can be linked into. A read-only
 // LIBRARY root means EROFS on every placement — a predictable mistake right
 // after the documentation teaches users to mount downloads :ro.
-func Writable(root string) (bool, error) {
-	p := filepath.Join(root, ".orphanarr-write-probe")
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
+func (p *Prober) Writable(root string) (bool, error) {
+	path := probeFile(root, "write")
+	if err := p.create(path, 0o600); err != nil {
 		return false, err
 	}
-	f.Close()
-	os.Remove(p)
+	p.remove(path)
 	return true, nil
 }
 
 // CaseInsensitive probes whether the destination folds case, so collision
 // detection can match what the filesystem will actually do.
-func CaseInsensitive(root string) (bool, error) {
-	p := filepath.Join(root, ".orphanarr-case-probe")
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
+func (p *Prober) CaseInsensitive(root string) (bool, error) {
+	path := probeFile(root, "case")
+	if err := p.create(path, 0o600); err != nil {
 		return false, err
 	}
-	f.Close()
-	defer os.Remove(p)
+	defer p.remove(path)
 
-	_, err = os.Stat(filepath.Join(root, ".ORPHANARR-CASE-PROBE"))
+	_, err := os.Stat(filepath.Join(root, ".ORPHANARR-PROBE-CASE"))
 	return err == nil, nil
 }

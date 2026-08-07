@@ -16,8 +16,8 @@
 >
 > Ratified is not finished. Every agent has approved *with reservations* at every vote, and the
 > reservations are applied in the changelog immediately following. **The document has now been
-> wrong about its own tallies three times**, which is why §0 tells you to trust the citations over
-> the counts.
+> wrong about its own tallies five times**, which is why §0 tells you to trust the citations over
+> the counts — and why the verification scripts now print their own totals.
 
 ### Amendment changelog — the four blocking answers, applied 2026-08-07
 
@@ -2545,7 +2545,7 @@ confidence enrichment, never as a hard dependency.**
 |---|---|---|
 | `tests/verification/fs_semantics_test.py` | 19 claims (`#C1`–`#C19`) about `link`/`rename`/`replace`/copy/`NAME_MAX`/permissions/reflink against two real filesystems. The regression net for every assertion in §6. **Triaged after the 2026-08-07 amendment: 7 become hardlink-conditional, 5 change role, 7 are unconditional, none becomes wrong.** | 19 checked, 0 refuted |
 | `tests/verification/bindmount_hardlink_test.sh` | Two bind mounts of one filesystem report identical `st_dev` **and** fail `link()`; a single shared mount succeeds. Unprivileged user+mount namespace — no Docker, no root. | 4 checked, 0 refuted |
-| `tests/verification/copy_semantics_test.py` | **15 claim IDs (`#C20`–`#C34`), 16 checks** — `#C23` carries two. The copy path is no longer the fallback but the only path, so this covers what §6.5 now rests on: `chmod`-on-copy not touching the source (`#C21`), mode surviving the `link`+`unlink` publish (`#C26`), `chown` needing `CAP_CHOWN` (`#C23`), umask stripping `mkdir`'s mode (`#C24`), setgid roots (`#C25`), `Bavail` vs `f_bfree` (`#C28`, **11.61 GiB** of root-reserved space), sparse inflation (`#C31`), a real `ENOSPC` mid-copy (`#C33`), `O_EXCL` on the partial (`#C34`), and the mutating-source class (`#C29`) that produced I13. | 16 checked, 0 refuted |
+| `tests/verification/copy_semantics_test.py` | **15 claim IDs (`#C20`–`#C34`), 17 checks** — `#C23` and `#C24` each carry two. The copy path is no longer the fallback but the only path, so this covers what §6.5 now rests on: `chmod`-on-copy not touching the source (`#C21`), mode surviving the `link`+`unlink` publish (`#C26`), `chown` needing `CAP_CHOWN` (`#C23`), umask stripping the mode argument of both `open(2)` and `mkdir(2)` (`#C24`), setgid roots (`#C25`), `Bavail` vs `f_bfree` (`#C28`, **11.61 GiB** of root-reserved space), sparse inflation (`#C31`), a real `ENOSPC` mid-copy (`#C33`), `O_EXCL` on the partial (`#C34`), and the mutating-source class (`#C29`) that produced I13. | 16 checked, 0 refuted |
 | `tests/verification/readonly_mount_test.sh` | 6 claims (`#R1`–`#R6`) on read-only bind mounts, unprivileged namespace, no Docker, no root. `:ro` blocks all 18 constructed write paths including `/proc/self/fd` re-open and `O_TMPFILE` (`#R1`) — but does **not** reach nested submounts (`#R4`), stop a symlink escaping (`#R3`), or survive a second writable mount of the same data (`#R6`); and it guarantees `EXDEV` (`#R2`). A non-recursive bind shows an **empty directory** where a disk of downloads lives (`#R5`). | 6 checked, 0 refuted |
 | `tests/verification/qbittorrent_contract_test.py` | Fixture fields all exist in `serialize_torrent.h`; the reference orphan predicate produces the documented outcome for 13 wire samples including every trap; `split(",")` on tags silently drops an exclusion tag. `--live` mode re-runs read-only against a real server. | PASS, 0 violations |
 | `tests/verification/corpus_lint.py` | The corpus is well-formed, IDs unique, every entry justifies itself, ≥25% negative expectations. | PASS — 118 entries, 27% negative |

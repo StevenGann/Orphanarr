@@ -275,7 +275,12 @@ def main() -> int:
                 )
                 os.chown(dst, -1, os.getegid())
 
-        # -- C24: umask silently strips bits from a created file -----------
+        # -- C24: umask silently strips bits from a created file AND dir ---
+        #
+        # Both halves are measured, because the Go code cites this claim for
+        # mkdir as well as for open. It previously measured only open(2),
+        # so three comments in internal/fsx cited #C24 for a property #C24
+        # did not test — the verdict was right and the provenance was not.
         old = os.umask(0o077)
         try:
             p = f"{root_b}/c24/file.mkv"
@@ -283,8 +288,21 @@ def main() -> int:
             fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
             os.close(fd)
             created = stat.S_IMODE(os.stat(p).st_mode)
+
+            d = f"{root_b}/c24/dir"
+            os.mkdir(d, 0o777)
+            created_dir = stat.S_IMODE(os.stat(d).st_mode)
         finally:
             os.umask(old)
+        check(
+            "mkdir(2)'s mode argument is masked by umask exactly as open(2)'s is: "
+            "mkdir(0o777) under umask 077 yields 0700. So a library directory created "
+            "with the configured dir_mode is NOT that mode, and an explicit chmod after "
+            "mkdir is the only way to deliver it — which is why fsx.MkdirAll chmods "
+            "every directory it creates.",
+            created_dir == 0o700,
+            f"mkdir(mode=0o777) under umask 0o077 produced {oct(created_dir)}",
+        )
         check(
             "umask silently strips permission bits at creation: open(..., 0o666) under "
             "umask 077 yields 0600. A copy-only Orphanarr that relies on the requested "
