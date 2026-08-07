@@ -243,6 +243,66 @@ The interface should be designed against one named second client, not against a 
 average of all of them. Torrent-only (Deluge, Transmission) and Usenet (SABnzbd, NZBGet) pull the
 design in different directions — Usenet breaks the infohash key, Deluge breaks the orphan predicate.
 
+### Raised by design round 02 (2026-08-07)
+
+From `team/rounds/round-02-blocking-answers-draft.md`, ratified 4 APPROVE / 1 REVISE. The number in
+brackets is how many of the five agents reached the question independently — the best available
+signal of which ones matter.
+
+**Q29 — What uid/gid does each media server run as, and is there a common group? [5/5]**
+`chown` needs `CAP_CHOWN`, which contradicts running as `--user 1000:1000`, so mode + shared group +
+umask is the *only* portable lever. This is the input needed to *use* the permissions fix that
+copy-only hands us. Was Q21, a docs question; A1 promoted it to a correctness input.
+
+**Q30 — Free space per library filesystem today, and your minimum acceptable remainder. [4/5]**
+`RESERVE_BYTES` never fired under hardlinking; it is now the gate that fires most. The harm is not
+Orphanarr stopping — it is Orphanarr filling the array so qBittorrent, Plex and the next download
+fail, with no visible connection to us.
+
+**Q31 — Do the download roots and library roots share one physical *pool*? [4/5]**
+Not Q1 restated: Q1 was mount topology, this is physics. Decides whether these copies are a
+one-flag fix, whether the space budget is one bucket or several, and whether v1 needs an I/O
+throttle or an execution window.
+
+**Q32 — Read-only download mounts, or hardlinks? You can have exactly one. [3/5]**
+Verified this round (`#R2`): a `:ro` bind is a separate vfsmount, so it guarantees `EXDEV` and
+forecloses hardlinking permanently — including after you later consolidate to a single `-v`. In
+exchange it makes "never touch a source file" a kernel guarantee (`#R1`: all 18 constructed write
+paths blocked). **This corrects the recommendation recorded under A3 above, which called `:ro`
+free. It is not free.**
+
+**Q33 — What uid/gid and umask does each qBittorrent instance write with?**
+If any writes `0600`, Orphanarr cannot read it in order to copy it — and the hardlink fallback is
+not a fallback: `safe_hardlink_source()` requires read *and* write access, and systemd ships
+`fs.protected_hardlinks = 1`. Both paths fail.
+
+**Q34 — On each Komga library: `scanCbx` / `scanPdf` / `scanEpub` / `oneshotsDirectory`? [2/5]**
+All four are per-library, all four silently change what our output means. A PDF filed into a
+library with `scanPdf` off is invisible. `oneshotsDirectory` defaults to `null`, and its matcher is
+a case-insensitive raw substring on the absolute path — a value of `books` under
+`/data/media/ebooks` turns the whole library into one-shots.
+
+**Q35 — Ebook grouping: series folders, or one-shots? [2/5]**
+We can parse `Discworld 03`, but we cannot know *Project Hail Mary* is standalone without the
+metadata lookup §1.2 forbids.
+
+**Q36 — On a full array: file *what fits*, or file *nothing*? [2/5]**
+The design implies the former without deciding it. Interacts with Q25.
+
+**Q37 — Do two clients share a download directory, or is any torrent in two clients? [2/5]**
+A3 says the container mounts the clients' download folders, plural. Two mounts of one host
+directory produce one physical file and two path strings, which silently defeats the cross-seed
+overlap gate — the design's most important safety check.
+
+**Q38 — Is anything else pruning the download directories (Cleanuparr, qbit_manage)?**
+Decides whether the new post-copy source re-check is a safety net or a routine event.
+
+**Also: Q7 is promoted to blocking-class.** Round 02 found that its supporting argument in the
+design ("hardlink-first makes racing an \*arr survivable") is now false, and A2 adds a second,
+less-hardened program that can trigger the same race — see Q27. And **Q23's `.pdf` tie-break got
+cheaper but not free**: both libraries are Komga now, so a misfile costs a shelf rather than
+readability, but `scanPdf` is per-library (Q34).
+
 ---
 
 ## 6. What "Done" Means for the Design Phase
