@@ -76,20 +76,52 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Ubuntu 23.10+ restricts unprivileged user namespaces through
+      # AppArmor, which is exactly the capability the two mount-topology
+      # scripts need. Relax it so the tests actually RUN rather than skip:
+      # a skipped mount test is how "st_dev equality implies linkability"
+      # would have survived into the codebase.
+      - name: Enable unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
       # Mocked filesystem tests would have hidden every hazard in DESIGN
       # §6.3. These run against real filesystems and real mount namespaces.
-      #
-      # If a runner cannot provide what a script needs, the script exits 2
-      # and THAT MUST BE VISIBLE, NOT SILENT. Do not delete these to make CI
-      # green (DESIGN §10.6).
       - name: link/rename/replace/copy semantics (#C1-#C19)
         run: python3 tests/verification/fs_semantics_test.py
 
       - name: copy path semantics (#C20-#C34)
         run: python3 tests/verification/copy_semantics_test.py
 
+      # Exit 2 means the runner cannot provide what the script needs. DESIGN
+      # §10.6 requires that skip to be VISIBLE, NOT SILENT — so it becomes a
+      # workflow warning annotation and the job summary records it. Any
+      # other non-zero exit is a real refutation and fails the build.
+      #
+      # Do not "fix" a red build here by deleting the script.
       - name: bind-mount hardlink behaviour
-        run: bash tests/verification/bindmount_hardlink_test.sh
+        run: |
+          set +e
+          bash tests/verification/bindmount_hardlink_test.sh
+          rc=$?
+          set -e
+          if [ $rc -eq 2 ]; then
+            echo "::warning title=Mount test SKIPPED::bindmount_hardlink_test.sh could not run on this runner (exit 2). The st_dev/EXDEV claims in DESIGN §6.3 were NOT verified in this build."
+            echo "- :warning: \`bindmount_hardlink_test.sh\` **skipped** — runner lacks unprivileged mount namespaces" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit $rc
 
       - name: read-only mount behaviour (#R1-#R6)
-        run: bash tests/verification/readonly_mount_test.sh
+        run: |
+          set +e
+          bash tests/verification/readonly_mount_test.sh
+          rc=$?
+          set -e
+          if [ $rc -eq 2 ]; then
+            echo "::warning title=Mount test SKIPPED::readonly_mount_test.sh could not run on this runner (exit 2). The :ro / EXDEV claims (#R1-#R6) were NOT verified in this build."
+            echo "- :warning: \`readonly_mount_test.sh\` **skipped** — runner lacks unprivileged mount namespaces" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          exit $rc
