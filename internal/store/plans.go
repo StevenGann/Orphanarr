@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -170,17 +171,24 @@ func (d *DB) GetOrphan(ctx context.Context, id int64) (Orphan, error) {
 // orphan accrued 96 duplicate draft plans a day and the review list — which
 // caps at 200 — filled with the same item.
 //
-// Only 'draft' is reusable, and that restriction is load-bearing.
+// 'draft' and 'blocked' are reusable; 'failed' is NOT, and that
+// distinction is load-bearing in both directions.
+//
 // SavePlan's update path DELETEs and re-inserts every step, which erases
-// created_by_us and created_dirs_json — so reusing a 'failed' or 'blocked'
-// plan would destroy the undo record for files its first attempt had
-// already placed, leaving them in the library with nothing recording that
-// Orphanarr put them there.
+// created_by_us and created_dirs_json. Reusing a FAILED plan would
+// therefore destroy the undo record for files its first attempt had
+// already placed. A BLOCKED plan failed PREFLIGHT — before any step ran,
+// so nothing was placed and there is no record to destroy.
+//
+// Excluding 'blocked' made it a dead end: the UI offers Execute only on
+// 'draft' and Undo only on an executed plan, so a plan refused for want of
+// space had no button at all AND suppressed every future plan for that
+// orphan. The user frees 5 TB and the item can never be filed again.
 func (d *DB) OpenPlanFor(ctx context.Context, orphanID int64) (int64, bool) {
 	var id int64
 	err := d.sql.QueryRowContext(ctx, `
         SELECT id FROM plan
-        WHERE orphan_id = ? AND status = 'draft'
+        WHERE orphan_id = ? AND status IN ('draft','blocked')
         ORDER BY id DESC LIMIT 1`, orphanID).Scan(&id)
 	return id, err == nil
 }
@@ -259,6 +267,23 @@ func (d *DB) SavePlan(ctx context.Context, p Plan) (int64, error) {
 	warn := "[]"
 	if len(p.Warnings) > 0 {
 		warn = string(p.Warnings)
+	}
+
+	if p.ID != 0 {
+		// Never reuse a plan that placed something. OpenPlanFor already
+		// restricts the statuses, but this makes the class unrepeatable
+		// rather than fixing one instance: a future caller cannot erase an
+		// undo record by widening a status list somewhere else.
+		var placed int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM plan_step WHERE plan_id=? AND created_by_us=1`,
+			p.ID).Scan(&placed); err != nil {
+			return 0, err
+		}
+		if placed > 0 {
+			return 0, fmt.Errorf("store: refusing to rewrite plan %d: %d of its steps "+
+				"placed files, and rewriting would erase their undo record", p.ID, placed)
+		}
 	}
 
 	if p.ID == 0 {
@@ -475,7 +500,11 @@ func (d *DB) Counts(ctx context.Context) (map[string]int, error) {
 	if err := q("orphans", `SELECT COUNT(*) FROM orphan`); err != nil {
 		return nil, err
 	}
-	if err := q("unknown", `SELECT COUNT(*) FROM orphan WHERE media_type='' OR media_type='unknown'`); err != nil {
+	// state='blocked' is excluded: a cross-seed blocked before
+	// classification has no media type, and counting it as Unclassified
+	// tells the user their classifier failed when it never ran.
+	if err := q("unknown", `SELECT COUNT(*) FROM orphan
+	     WHERE state != 'blocked' AND (media_type='' OR media_type='unknown')`); err != nil {
 		return nil, err
 	}
 	if err := q("plans_review", `SELECT COUNT(*) FROM plan WHERE status='draft'`); err != nil {
@@ -519,10 +548,10 @@ func (d *DB) ReleaseStuckPlans(ctx context.Context) error {
 // UnresolvedPlanFor reports a plan that has stopped and is waiting on the
 // user, returning its status.
 //
-// A failed or blocked plan is deliberately NOT reusable — SavePlan's reuse
-// branch deletes and re-inserts every step, which would erase the undo
-// record for files the first attempt already placed. But it must not be
-// silently duplicated either: without this check every scan minted a fresh
+// A FAILED plan is deliberately not reusable — SavePlan's reuse branch
+// deletes and re-inserts every step, which would erase the undo record for
+// files the first attempt already placed. But it must not be silently
+// duplicated either: without this check every scan minted a fresh
 // draft for the same orphan and the review queue refilled with it, which is
 // the same harm OpenPlanFor exists to prevent, arriving from the other
 // side.
@@ -530,7 +559,7 @@ func (d *DB) UnresolvedPlanFor(ctx context.Context, orphanID int64) (string, boo
 	var status string
 	err := d.sql.QueryRowContext(ctx, `
         SELECT status FROM plan
-        WHERE orphan_id = ? AND status IN ('failed','blocked','executing','undo_failed')
+        WHERE orphan_id = ? AND status IN ('failed','executing','undo_failed')
         ORDER BY id DESC LIMIT 1`, orphanID).Scan(&status)
 	return status, err == nil
 }

@@ -279,13 +279,35 @@ func (o *Overlap) Add(idx int, c Candidate, fs fsx.FS) {
 // produces a duplicate library entry and, under copy-only, a full second
 // copy of content already imported.
 func (o *Overlap) AddPeers(peers []Candidate, fs fsx.FS) map[int]bool {
+	b, _ := o.addPeers(peers, fs)
+	return b
+}
+
+// AddPeersNamed is AddPeers plus, for each blocked candidate, the name of
+// the categorised torrent that caused it.
+//
+// The causal peer is the *arr-managed one. Reporting the uncategorised
+// siblings instead — which is what listing the transitive closure does —
+// tells the user "this overlaps a categorised torrent" and then names
+// three torrents that are not it.
+func (o *Overlap) AddPeersNamed(peers []Candidate, fs fsx.FS) (map[int]bool, map[int]string) {
+	return o.addPeers(peers, fs)
+}
+
+func (o *Overlap) addPeers(peers []Candidate, fs fsx.FS) (map[int]bool, map[int]string) {
 	blocked := map[int]bool{}
+	cause := map[int]string{}
+	var causedBy string
 	mark := func(list []int) {
 		for _, i := range list {
 			blocked[i] = true
+			if _, seen := cause[i]; !seen {
+				cause[i] = causedBy
+			}
 		}
 	}
 	for _, pc := range peers {
+		causedBy = pc.Item.Name
 		for _, p := range pc.LocalPaths {
 			clean := path.Clean(p)
 			mark(o.byPath[clean])
@@ -307,11 +329,17 @@ func (o *Overlap) AddPeers(peers []Candidate, fs fsx.FS) map[int]bool {
 	// which is the more dangerous half, because the collapse produces a
 	// duplicate entry and the block prevents a full second copy.
 	for _, idx := range keys(blocked) {
+		src := cause[idx]
 		for _, peer := range o.Transitive(idx) {
 			blocked[peer] = true
+			if _, seen := cause[peer]; !seen {
+				// Reached through a chain, so name the same owner plus the
+				// fact that it was indirect.
+				cause[peer] = src + " (via an overlapping torrent)"
+			}
 		}
 	}
-	return blocked
+	return blocked, cause
 }
 
 func keys(m map[int]bool) []int {

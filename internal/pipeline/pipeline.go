@@ -436,7 +436,7 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 	for i, c := range candidates {
 		ov.Add(i, c, p.fs)
 	}
-	blocked := ov.AddPeers(categorisedPeers, p.fs)
+	blocked, blockedBy := ov.AddPeersNamed(categorisedPeers, p.fs)
 
 	claimed := map[int]bool{}
 	plansMade := 0
@@ -457,18 +457,21 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			// full duplicate copy, and §3.4 ranks the latter highest for
 			// damage. But it must be VISIBLE: this is surfaced with the
 			// overlap chain named, not silently skipped.
-			chain := overlapChain(ov, i, candidates)
+			owner := blockedBy[i]
+			if owner == "" {
+				owner = "a categorised torrent"
+			}
 			sum.Skipped["CROSS_SEED_BLOCKED"]++
 			orphanID, _ := p.db.UpsertOrphan(ctx, store.Orphan{
 				ClientID: clientRowID(c), ExternalID: string(c.Item.ID),
 				Name: c.Item.Name, SavePath: c.Item.SavePath,
 				Fingerprint: c.Fingerprint, State: "blocked",
-				MediaType: "", Reason: "cross_seed:" + chain,
+				MediaType: "", Reason: "cross_seed: " + owner,
 			})
 			p.db.LogEvent(ctx, store.Event{
 				Level: "warn", Code: "CROSS_SEED_BLOCKED", OrphanID: &orphanID,
-				Message: c.Item.Name + ": shares content with a categorised torrent " +
-					"an *arr already manages (" + chain + ")",
+				Message: c.Item.Name + ": shares content with " + owner +
+					", which is categorised and so already managed by an *arr",
 			})
 			continue
 		}
@@ -713,26 +716,6 @@ func (p *Pipeline) savePlan(ctx context.Context, orphanID int64, t media.Type,
 	}
 
 	return p.db.SavePlan(ctx, pl)
-}
-
-// overlapChain names the peers that caused a block, so an over-block is
-// something the user can see and argue with rather than an item that
-// silently never appears.
-func overlapChain(ov *scan.Overlap, idx int, all []scan.Candidate) string {
-	peers := ov.Transitive(idx)
-	if len(peers) == 0 {
-		return "direct overlap"
-	}
-	names := make([]string, 0, len(peers))
-	for _, p := range peers {
-		if p < len(all) {
-			names = append(names, all[p].Item.Name)
-		}
-	}
-	if len(names) == 0 {
-		return "direct overlap"
-	}
-	return "via " + strings.Join(names, ", ")
 }
 
 func clientRowID(c scan.Candidate) int64 {

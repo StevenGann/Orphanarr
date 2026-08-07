@@ -260,3 +260,88 @@ func TestSystemStatesRefreshButUserDecisionsDoNot(t *testing.T) {
 		t.Errorf("state = %q; the user's Ignore must survive a re-scan", got.State)
 	}
 }
+
+// A BLOCKED plan must not be a dead end.
+//
+// It failed PREFLIGHT — before any step ran — so it placed nothing and is
+// safe to reuse. Excluding it made a plan refused for want of space
+// unreachable: the UI offers Execute only on 'draft' and Undo only on an
+// executed plan, so it had no button AND suppressed every future plan for
+// that orphan. The user frees 5 TB and the item can never be filed again.
+func TestBlockedPlanIsReusableButFailedIsNot(t *testing.T) {
+	ctx := context.Background()
+	db := newDB(t)
+	cid := seedClient(t, db)
+	oid, _ := db.UpsertOrphan(ctx, Orphan{ClientID: cid, ExternalID: "x", Name: "M"})
+
+	id, err := db.SavePlan(ctx, Plan{OrphanID: oid, MediaType: "movie", Status: "draft",
+		Steps: []PlanStep{{Seq: 0, SrcPath: "/a", DstPath: "/b", SrcSize: 10}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetPlanStatus(ctx, id, "blocked", "insufficient free space")
+
+	got, ok := db.OpenPlanFor(ctx, oid)
+	if !ok || got != id {
+		t.Fatalf("a blocked plan was not reusable; it placed nothing, so it must be")
+	}
+	if _, ok := db.UnresolvedPlanFor(ctx, oid); ok {
+		t.Error("a blocked plan must not suppress future plans for its orphan")
+	}
+
+	// A FAILED plan is the opposite on both counts.
+	db.SetPlanStatus(ctx, id, "failed", "ENOSPC at step 200")
+	if _, ok := db.OpenPlanFor(ctx, oid); ok {
+		t.Error("a failed plan was offered for reuse; its steps would be wiped")
+	}
+	if st, ok := db.UnresolvedPlanFor(ctx, oid); !ok || st != "failed" {
+		t.Errorf("UnresolvedPlanFor = %q, %v; a failed plan must suppress duplicates", st, ok)
+	}
+}
+
+// Belt and braces: a plan whose steps placed files can never be rewritten,
+// whatever status list a future caller widens.
+func TestSavePlanRefusesToRewriteAPlanThatPlacedFiles(t *testing.T) {
+	ctx := context.Background()
+	db := newDB(t)
+	cid := seedClient(t, db)
+	oid, _ := db.UpsertOrphan(ctx, Orphan{ClientID: cid, ExternalID: "x", Name: "M"})
+
+	id, err := db.SavePlan(ctx, Plan{OrphanID: oid, MediaType: "movie", Status: "draft",
+		Steps: []PlanStep{{Seq: 0, SrcPath: "/a", DstPath: "/b", SrcSize: 10}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.UpdateStepResult(ctx, PlanStep{PlanID: id, Seq: 0, DstPath: "/b",
+		CreatedByUs: true, Status: "done"})
+
+	_, err = db.SavePlan(ctx, Plan{ID: id, OrphanID: oid, MediaType: "movie",
+		Status: "draft", Steps: []PlanStep{{Seq: 0, SrcPath: "/a", DstPath: "/b"}}})
+	if err == nil {
+		t.Fatal("SavePlan rewrote a plan whose step had placed a file, erasing its " +
+			"undo record")
+	}
+}
+
+// A cross-seed blocked before classification has no media type, and
+// counting it as Unclassified tells the user their classifier failed when
+// it never ran.
+func TestBlockedOrphansDoNotInflateTheUnclassifiedCount(t *testing.T) {
+	ctx := context.Background()
+	db := newDB(t)
+	cid := seedClient(t, db)
+
+	db.UpsertOrphan(ctx, Orphan{ClientID: cid, ExternalID: "a", Name: "X",
+		State: "blocked", MediaType: ""})
+	db.UpsertOrphan(ctx, Orphan{ClientID: cid, ExternalID: "b", Name: "Y",
+		State: "unknown", MediaType: "unknown"})
+
+	counts, err := db.Counts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["unknown"] != 1 {
+		t.Errorf("unclassified = %d, want 1 (the blocked cross-seed must not count)",
+			counts["unknown"])
+	}
+}
