@@ -43,6 +43,7 @@ type Pipeline struct {
 	fs     fsx.FS
 	guard  *fsx.Guard
 	prober *probe.Prober
+	ndjson *ndjson
 	cfg    config.Config
 
 	mu      sync.RWMutex
@@ -65,6 +66,7 @@ func New(db *store.DB, g *fsx.Guard, cfg config.Config) *Pipeline {
 	return &Pipeline{
 		db: db, fs: g, guard: g, cfg: cfg,
 		prober: probe.New(g),
+		ndjson: newNDJSON(cfg.ConfigDir),
 	}
 }
 
@@ -379,7 +381,17 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 				seen = now
 			}
 
-			localPaths, _ := scan.ResolveLocal(e.Mapper, it, files)
+			localPaths, resolveErr := scan.ResolveLocal(e.Mapper, it, files)
+			if resolveErr != nil {
+				// An unmapped path, or a manifest entry that escapes its
+				// own save path. Either is a refusal, never a guess.
+				sum.Skipped["SKIP_UNMAPPED"]++
+				p.db.LogEvent(ctx, store.Event{
+					Level: "warn", Code: "SKIP_UNMAPPED",
+					Message: it.Name + ": " + resolveErr.Error(),
+				})
+				continue
+			}
 
 			// Register the resolved save path as a source root. This is
 			// what arms I1 under identity mapping: the guard now refuses

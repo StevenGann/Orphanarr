@@ -482,3 +482,18 @@ func (d *DB) MarkStepInProgress(ctx context.Context, planID int64, seq int, dst 
 		dst, planID, seq)
 	return err
 }
+
+// ReleaseStuckPlans moves plans interrupted mid-execution back to a state
+// the user can act on.
+//
+// A plan left at 'executing' is unreachable from every direction: the UI
+// offers Execute only on 'draft' and Undo only on 'done', 'partial' or
+// 'failed'. It becomes 'failed' with an explanation, which is the state
+// that offers Resume, Roll back and Ignore.
+func (d *DB) ReleaseStuckPlans(ctx context.Context) error {
+	_, err := d.sql.ExecContext(ctx, `
+        UPDATE plan SET status='failed',
+               error='interrupted by a restart; steps were reconciled on startup'
+        WHERE status='executing'`)
+	return err
+}

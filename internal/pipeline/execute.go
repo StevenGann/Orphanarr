@@ -58,6 +58,26 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 
 	steps := toExecSteps(pl.Steps)
 
+	// Skip steps a previous attempt already completed.
+	//
+	// Re-executing a failed plan restarted at step 0, which under the
+	// suffix collision policy produced "Foo (2).mkv" beside every
+	// already-placed file — a full duplicate of the completed portion, at
+	// exactly the moment the plan failed for want of space. This is §6.7's
+	// Resume button.
+	pending := make([]exec.Step, 0, len(steps))
+	for _, s := range steps {
+		if s.Status == "done" {
+			continue
+		}
+		pending = append(pending, s)
+	}
+	if len(pending) == 0 {
+		p.db.SetPlanStatus(rec, planID, "done", "")
+		return nil
+	}
+	steps = pending
+
 	// The hardlink fast path is enabled per pair, only where the probe has
 	// actually passed. Never globally: an all-or-nothing switch forces
 	// copies onto provably linkable pairs.
@@ -79,7 +99,7 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 	opts.ReserveBytes = cfg.ReserveBytes
 	opts.ReserveFraction = cfg.ReserveFraction
 
-	ex := exec.New(p.fs, newJournal(p.db, planID), opts)
+	ex := exec.New(p.fs, newJournal(p.db, p.ndjson, planID), opts)
 
 	// Preflight before anything is written, and report the numbers. A tool
 	// that fills someone's array at 3am and then cannot write its own
@@ -223,6 +243,14 @@ func (p *Pipeline) Reconcile(ctx context.Context) error {
 		})
 	}
 
+	// Free plans that were interrupted mid-execution. Without this a
+	// crashed plan stays at "executing" forever: the UI offers Execute
+	// only on draft and Undo only on done/partial/failed, so it is
+	// unreachable from every direction.
+	if err := p.db.ReleaseStuckPlans(rec); err != nil {
+		errs = append(errs, err)
+	}
+
 	p.db.LogEvent(rec, store.Event{
 		Code: "RECONCILED",
 		Message: fmt.Sprintf("repaired %d interrupted steps, %d errors",
@@ -280,38 +308,6 @@ func toExecSteps(rows []store.PlanStep) []exec.Step {
 	return out
 }
 
-// journal writes every mutation to the database before it is attempted and
-// again after it succeeds (I7).
-type journal struct {
-	db     *store.DB
-	planID int64
-}
-
-func newJournal(db *store.DB, planID int64) *journal {
-	return &journal{db: db, planID: planID}
-}
-
-func (j *journal) Before(ctx context.Context, s *exec.Step) error {
-	// Status and destination only. Writing a zero PlanStep here cleared
-	// created_by_us and created_dirs_json on every step of a RETRIED plan,
-	// so the files placed by the first attempt became unremovable: rollback
-	// keys on created_by_us and would never see them again.
-	//
-	// Uses a cancellation-free context: this is the record of what we are
-	// about to do, and it must survive the request that triggered it being
-	// abandoned.
-	return j.db.MarkStepInProgress(context.WithoutCancel(ctx), j.planID, s.Seq, s.Dst)
-}
-
-func (j *journal) After(ctx context.Context, s *exec.Step) error {
-	ctx = context.WithoutCancel(ctx)
-	return j.db.UpdateStepResult(ctx, store.PlanStep{
-		PlanID: j.planID, Seq: s.Seq, DstPath: s.Dst,
-		MethodActual: string(s.Actual), CreatedByUs: s.CreatedByUs,
-		CreatedDirs: s.CreatedDirs, Status: "done",
-	})
-}
-
 // TestClient probes an unsaved configuration.
 //
 // It reports whether the instance can be reached, what it is, and — the
@@ -353,8 +349,6 @@ func (p *Pipeline) TestClient(ctx context.Context, c store.Client) (map[string]a
 		return out, nil
 	}
 
-	// The uncategorised count is the whole pitch, delivered at the moment
-	// the user connects the client rather than after their first scan.
 	items, err := impl.ListItems(ctx)
 	if err != nil {
 		out["warning"] = "connected, but listing items failed: " + err.Error()
@@ -363,6 +357,9 @@ func (p *Pipeline) TestClient(ctx context.Context, c store.Client) (map[string]a
 	uncategorised, complete := 0, 0
 	var bytes int64
 	for _, it := range items {
+		// Match the predicate exactly: whitespace is a category, so the
+		// connect screen's headline number cannot disagree with what a
+		// scan will actually find.
 		if it.Category != nil && *it.Category == "" {
 			uncategorised++
 			if it.Complete {

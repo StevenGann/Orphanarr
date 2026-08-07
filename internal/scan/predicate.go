@@ -8,6 +8,7 @@
 package scan
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -358,7 +359,19 @@ func (o *Overlap) Peers(idx int, c Candidate) []int {
 	return out
 }
 
+// ErrEscapes means a manifest entry resolved outside its own save path.
+var ErrEscapes = errors.New("scan: a manifest path escapes the save path")
+
 // ResolveLocal maps a candidate's wanted files into container paths.
+//
+// Every entry is checked for containment. A manifest is client-supplied
+// data derived from a .torrent file, so a name like "../../etc/passwd" is
+// hostile input arriving through a trusted-looking channel — and
+// path.Join collapses it silently, yielding a real path outside every
+// configured root. Whether libtorrent can actually emit one is
+// [UNVERIFIED]; the check costs one comparison and the consequence of
+// being wrong is a read, a stat, and a probe-file create somewhere nobody
+// configured.
 func ResolveLocal(m *pathmap.Mapper, item client.Item, files []client.File) ([]string, error) {
 	base, err := m.ToLocal(item.SavePath)
 	if err != nil {
@@ -369,7 +382,12 @@ func ResolveLocal(m *pathmap.Mapper, item client.Item, files []client.File) ([]s
 		if !f.Wanted {
 			continue
 		}
-		out = append(out, path.Join(base, f.RelPath))
+		p := path.Join(base, f.RelPath)
+		if !underPath(p, base) {
+			return nil, fmt.Errorf("%w: %q resolved to %q, outside %q",
+				ErrEscapes, f.RelPath, p, base)
+		}
+		out = append(out, p)
 	}
 	return out, nil
 }
