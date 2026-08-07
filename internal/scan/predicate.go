@@ -35,9 +35,9 @@ func drop(code, detail string) Decision {
 
 // Exclusions are the user's opt-outs.
 type Exclusions struct {
-	Tags       []string
-	SavePaths  []string // glob prefixes
-	Trackers   []string
+	Tags         []string
+	SavePaths    []string // glob prefixes
+	Trackers     []string
 	Fingerprints map[string]bool // sticky "ignore" decisions
 }
 
@@ -49,9 +49,9 @@ type Settings struct {
 
 // Candidate is an item plus everything resolved about it.
 type Candidate struct {
-	Client   client.DownloadClient
-	Item     client.Item
-	Files    []client.File
+	Client client.DownloadClient
+	Item   client.Item
+	Files  []client.File
 	// LocalPaths are the container-visible absolute paths of wanted files.
 	LocalPaths  []string
 	Fingerprint string
