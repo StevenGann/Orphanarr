@@ -6,10 +6,18 @@ Jellyfin, Navidrome, Komga, RomM and friends will actually see them.
 
 [![CI](https://github.com/StevenGann/Orphanarr/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenGann/Orphanarr/actions/workflows/ci.yml)
 
-> **Status: v0.2, pre-release.** The loop is complete and usable from the web UI: connect a
+> **Status: v0.3, pre-release.** The loop is complete and usable from the web UI: connect a
 > client, point it at libraries, scan, review each plan file by file, execute, undo. Dry-run
-> ships **on**. Evaluate it on a small library before pointing it at 40 TB — not because
-> anything is known to be wrong, but because nobody has run it against a real 40 TB library yet.
+> ships **on**.
+>
+> v0.3 is the output of a full adversarial review of v0.2 — five reviewers, two holding veto
+> power, three rounds, 30-odd findings. Three of them were paths that could have deleted a file
+> the user cared about, and one was that five of the seven media types could not file correctly
+> at all. Every one is fixed and has a regression test. What that history should tell you is not
+> "this is now safe" but "this is a program where being wrong is expensive, and it is being
+> treated that way".
+>
+> Evaluate it on a small library first. Nobody has run it against a real 40 TB library yet.
 
 ## The problem
 
