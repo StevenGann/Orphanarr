@@ -6,10 +6,10 @@ Jellyfin, Navidrome, Komga, RomM and friends will actually see them.
 
 [![CI](https://github.com/StevenGann/Orphanarr/actions/workflows/ci.yml/badge.svg)](https://github.com/StevenGann/Orphanarr/actions/workflows/ci.yml)
 
-> **Status: v0.1, pre-release.** The pipeline runs end to end — scan, classify, lay out, plan —
-> and dry-run ships **on**. Plan execution is wired but not yet exposed in the UI, so nothing
-> reaches a media filesystem unless you go looking for it. Treat this as something to evaluate,
-> not something to point at 40 TB.
+> **Status: v0.2, pre-release.** The loop is complete and usable from the web UI: connect a
+> client, point it at libraries, scan, review each plan file by file, execute, undo. Dry-run
+> ships **on**. Evaluate it on a small library before pointing it at 40 TB — not because
+> anything is known to be wrong, but because nobody has run it against a real 40 TB library yet.
 
 ## The problem
 
@@ -87,12 +87,18 @@ edit something that will be overwritten.
 
 ```bash
 go test ./...                                    # unit and corpus tests
+go build -o orphanarr ./cmd/orphanarr
+bash tests/e2e/roundtrip.sh ./orphanarr          # full API round trip vs a fake qBittorrent
 python3 tests/verification/fs_semantics_test.py  # filesystem claims, real filesystems
 python3 tests/verification/corpus_lint.py        # corpus well-formedness
 ```
 
 `tests/corpus/` is the classifier's specification: 118 cases, at least a quarter of which expect a
 *negative* result. A classifier that never refuses has simply moved its errors into your library.
+
+`tests/e2e/roundtrip.sh` drives the whole thing over HTTP against a fake qBittorrent and
+checksums the source file before and after a full execute. Every package refuses to touch a
+source individually; that test proves the composition of all of them still does.
 
 `tests/verification/` holds 44 executable claims about filesystem and mount behaviour, run in CI
 against real filesystems and real mount namespaces. If a runner cannot provide what a script needs
