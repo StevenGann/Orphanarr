@@ -53,10 +53,19 @@ func (j *ndjson) append(planID int64, s *exec.Step) error {
 	if err := os.MkdirAll(j.dir, 0o755); err != nil {
 		return err
 	}
+	// Track whether this append creates the file, so the directory entry
+	// can be fsynced too. Without it the FIRST append of each calendar
+	// month can lose the whole file to a crash rather than just its last
+	// line — and this journal exists precisely for the crash case.
+	created := false
 	// One file per month, so a long-running instance stays greppable
 	// without a rotation mechanism nobody would maintain.
 	now := time.Now().UTC()
 	path := filepath.Join(j.dir, now.Format("2006-01")+".ndjson")
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		created = true
+	}
 
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -76,7 +85,18 @@ func (j *ndjson) append(planID int64, s *exec.Step) error {
 	}
 	// fsync, because a journal that loses its last entries in the crash it
 	// exists to survive is decoration.
-	return f.Sync()
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if created {
+		d, err := os.Open(j.dir)
+		if err != nil {
+			return err
+		}
+		defer d.Close()
+		return d.Sync()
+	}
+	return nil
 }
 
 // journal writes every mutation to the database before it is attempted and

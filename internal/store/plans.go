@@ -515,3 +515,22 @@ func (d *DB) ReleaseStuckPlans(ctx context.Context) error {
         WHERE status='executing'`)
 	return err
 }
+
+// UnresolvedPlanFor reports a plan that has stopped and is waiting on the
+// user, returning its status.
+//
+// A failed or blocked plan is deliberately NOT reusable — SavePlan's reuse
+// branch deletes and re-inserts every step, which would erase the undo
+// record for files the first attempt already placed. But it must not be
+// silently duplicated either: without this check every scan minted a fresh
+// draft for the same orphan and the review queue refilled with it, which is
+// the same harm OpenPlanFor exists to prevent, arriving from the other
+// side.
+func (d *DB) UnresolvedPlanFor(ctx context.Context, orphanID int64) (string, bool) {
+	var status string
+	err := d.sql.QueryRowContext(ctx, `
+        SELECT status FROM plan
+        WHERE orphan_id = ? AND status IN ('failed','blocked','executing','undo_failed')
+        ORDER BY id DESC LIMIT 1`, orphanID).Scan(&status)
+	return status, err == nil
+}

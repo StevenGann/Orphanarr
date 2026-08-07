@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -34,6 +35,11 @@ const (
 	SeparateMnt Outcome = "copy only — separate mounts"
 	SourceRO    Outcome = "copy only — source is on a read-only mount"
 	Unknown     Outcome = "not probed"
+	// DryRun is a fourth outcome, not a fourth way of saying SeparateMnt.
+	// A probe refused because dry-run is engaged tells you NOTHING about
+	// mount topology, and reporting it as "separate mounts" sends the user
+	// to fix a configuration that may be perfectly correct.
+	DryRun Outcome = "not probed — dry run is on"
 )
 
 // Result is one pair's answer, with the evidence.
@@ -149,6 +155,19 @@ func rank(o Outcome) int {
 	return 0
 }
 
+// errDryRun lets probePair distinguish "the port refused because dry-run is
+// on" from every other create failure, without importing fsx and inverting
+// the dependency.
+var errDryRun = errors.New("fsx: refusing to write in dry-run mode (I10)")
+
+// IsDryRunRefusal reports whether an error from the port is a dry-run
+// refusal. The port's sentinel is matched by message because probe must not
+// depend on fsx — fsx depends on nothing, and keeping it that way is what
+// lets the fault-injecting implementation exist.
+func isDryRunRefusal(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "dry-run")
+}
+
 // EnsureProbed probes a pair once, lazily. Under the common deployment the
 // container mounts the client's download folder at the path the client
 // already reports, so there are no path-mapping rules to enumerate at
@@ -168,6 +187,16 @@ func (p *Prober) EnsureProbed(srcRoot, dstRoot string) Result {
 // than something the executor does implicitly.
 func (p *Prober) Probe(srcRoot, dstRoot string) Result {
 	res := p.probePair(srcRoot, dstRoot)
+
+	// A dry-run refusal is TRANSIENT and must not be cached. Caching it
+	// would turn "we did not ask" into "we asked and the answer is no",
+	// and the cached entry would outlive the condition — surviving until a
+	// restart even after the user turns dry-run off, while blaming their
+	// mount topology for it. A refusal that is cached becomes a fact.
+	if res.Outcome == DryRun {
+		return res
+	}
+
 	p.mu.Lock()
 	p.cache[key(srcRoot, dstRoot)] = res
 	p.mu.Unlock()
@@ -201,6 +230,12 @@ func (p *Prober) probePair(srcRoot, dstRoot string) Result {
 	dst := probeFile(dstRoot, "dst")
 
 	if err := p.create(src, 0o600); err != nil {
+		if isDryRunRefusal(err) {
+			res.Outcome = DryRun
+			res.Detail = "capability probes do not run in dry-run, so hardlink " +
+				"availability is unknown rather than unavailable"
+			return res
+		}
 		res.Outcome = SeparateMnt
 		res.Detail = "could not create a probe file in the download root: " + err.Error()
 		return res

@@ -574,6 +574,21 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 			continue
 		}
 
+		// A plan that FAILED or is BLOCKED is not reusable — reuse would
+		// erase the undo record for files its first attempt already placed
+		// — but it must not be duplicated either, or the review queue
+		// refills with the same item every scan interval. It is the user's
+		// to resolve: Resume, Roll back or Ignore.
+		if st, ok := p.db.UnresolvedPlanFor(ctx, orphanID); ok {
+			sum.Skipped["SKIP_PLAN_AWAITING_USER"]++
+			p.db.LogEvent(ctx, store.Event{
+				Code: "SKIP_PLAN_AWAITING_USER", OrphanID: &orphanID,
+				Message: fmt.Sprintf("%s already has a %s plan waiting on you",
+					c.Item.Name, st),
+			})
+			continue
+		}
+
 		planID, err := p.savePlan(ctx, orphanID, cl.Type, res, needsReview, reason, lib)
 		if err != nil {
 			sum.Errors = append(sum.Errors, err.Error())

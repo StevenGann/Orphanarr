@@ -79,3 +79,45 @@ func TestUnrelatedCandidateIsNotBlocked(t *testing.T) {
 		t.Fatal("a candidate sharing nothing with a categorised torrent was blocked")
 	}
 }
+
+// The asymmetric fixture the coordinator asked for.
+//
+// TestCategorisedPeerBlocksTheCandidate puts the only candidate at index 0
+// and the only peer at index 0, so it passes whether AddPeers returns
+// indexes into the CANDIDATE set or into the PEER slice — and which of
+// those it returns decides whether the gate blocks the right torrent or a
+// bystander. This separates them: the overlapping candidate is at index 2,
+// and the matching peer is at position 0 of the peer slice.
+//
+// If AddPeers ever returns peer-slice indexes, blocked[0] is set and the
+// candidate that actually overlaps goes unblocked — the gate would look
+// green and file a duplicate of *arr-owned content while refusing an
+// unrelated item.
+func TestAddPeersReturnsCandidateIndexesNotPeerIndexes(t *testing.T) {
+	unrelatedA := cand("a", "FP-A", "/data/t/a/ep.mkv")
+	unrelatedB := cand("b", "FP-B", "/data/t/b/ep.mkv")
+	overlapping := cand("c", "FP-C", "/data/t/shared/ep.mkv")
+
+	candidates := []Candidate{unrelatedA, unrelatedB, overlapping}
+	ov := NewOverlap()
+	for i, c := range candidates {
+		ov.Add(i, c, nil)
+	}
+
+	// One categorised peer, at peer-slice index 0, overlapping candidate 2.
+	blocked := ov.AddPeers([]Candidate{cand("p", "FP-P", "/data/t/shared/ep.mkv")}, nil)
+
+	if !blocked[2] {
+		t.Error("the candidate that shares a path with the categorised torrent " +
+			"was not blocked")
+	}
+	if blocked[0] {
+		t.Error("candidate 0 was blocked; it shares no path, inode or fingerprint " +
+			"with the categorised torrent. AddPeers is returning peer-slice " +
+			"indexes, so the gate blocks a bystander and lets the real " +
+			"cross-seed through")
+	}
+	if blocked[1] {
+		t.Error("candidate 1 was blocked and overlaps nothing")
+	}
+}

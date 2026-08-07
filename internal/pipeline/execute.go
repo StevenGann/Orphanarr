@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"path"
 	"time"
 
 	"github.com/StevenGann/Orphanarr/internal/client"
@@ -102,9 +101,18 @@ func (p *Pipeline) Execute(ctx context.Context, planID int64) error {
 	// The hardlink fast path is enabled per pair, only where the probe has
 	// actually passed. Never globally: an all-or-nothing switch forces
 	// copies onto provably linkable pairs.
+	//
+	// The lookup key must be the REGISTERED SOURCE ROOT, the same key
+	// savePlan cached under. Looking it up under path.Dir(steps[0].Src) —
+	// the torrent's own subfolder — always missed, so every plan that said
+	// "hardlink" executed as a full copy and the difference was invisible
+	// except in method_actual. Two halves of one decision keyed
+	// differently is a bug that cannot be seen from either half.
 	allowLink := false
-	if r, ok := p.prober.Get(path.Dir(steps[0].Src), lib.Root); ok && r.Outcome == probe.Available {
-		allowLink = true
+	if root, ok := p.guard.SourceRootFor(steps[0].Src); ok {
+		if r, cached := p.prober.Get(root, lib.Root); cached && r.Outcome == probe.Available {
+			allowLink = true
+		}
 	}
 
 	cfg := p.Config()
@@ -413,6 +421,15 @@ func (p *Pipeline) ApplyConfig(ctx context.Context) (config.Config, error) {
 		cfg.APIKey = old.APIKey
 	}
 
+	wasDry := old.DryRun
 	p.SetConfig(cfg)
+
+	// Turning dry-run OFF makes probing legal for the first time. Without
+	// this the badge stays at "not probed — dry run is on" until a restart
+	// or an unrelated client save, which reads as a broken probe rather
+	// than a stale one.
+	if wasDry && !cfg.DryRun {
+		p.probeAllPairs(ctx)
+	}
 	return cfg, nil
 }
