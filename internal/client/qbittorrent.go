@@ -95,7 +95,21 @@ func (q *qbClient) do(ctx context.Context, method, path string, form url.Values)
 // The contract DIFFERS BY VERSION and both halves must be handled:
 //
 //	<= 5.1.x   success -> 200 body "Ok."      failure -> 200 body "Fails."
-//	>= 5.2.0   success -> 200 empty body      failure -> 401
+//	>= 5.2.0   success -> 204 empty body      failure -> 401
+//
+// The 5.2 success code is 204, NOT 200 — this was wrong here until a
+// 5.2.1 instance rejected every login with "login returned 204 OK".
+// 5.2 rewrote loginAction() to call setStatus(APIStatus::Ok) and dropped
+// the setResult("Ok.") that used to supply a body; webapplication.cpp
+// then does `if (result.data.isNull()) status(204)`, and qBittorrent's
+// status() defaults its reason phrase to "OK", which is why the wire
+// carries the otherwise nonexistent "HTTP/1.1 204 OK".
+//
+// This is not an edge case: on 5.2.x EVERY successful login is a 204,
+// whether it validated credentials or short-circuited on an already-live
+// session (WebUI auth bypass for a whitelisted subnet, or our own SID
+// cookie still being valid). Treating 204 as an error meant Orphanarr
+// could not talk to any qBittorrent 5.2 at all.
 //
 // Judging on status code alone — which is what the 5.2 contract invites —
 // makes a WRONG PASSWORD look like success on every 4.x and 5.0/5.1
@@ -140,6 +154,11 @@ func (q *qbClient) login(ctx context.Context) error {
 			return errors.New("qbittorrent: authentication failed: bad username or password " +
 				"(this server reports failures as 200 \"Fails.\", which is the pre-5.2 contract)")
 		}
+		q.loggedIn = true
+		return nil
+	case http.StatusNoContent:
+		// The >= 5.2 success path. There is no body to disambiguate, and
+		// none is needed: 5.2 signals failure with 401, never with 204.
 		q.loggedIn = true
 		return nil
 	case http.StatusForbidden:

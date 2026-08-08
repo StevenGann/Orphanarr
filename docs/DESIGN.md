@@ -670,8 +670,32 @@ safer default since a redirecting qBittorrent endpoint is a misconfiguration wor
 
 Authenticate on **status code plus the presence of the `SID` cookie**, accepting an empty body.
 The widespread idiom of checking for the body `"Ok."` is also wrong on 5.x:
-`setStatus(APIStatus::Ok)` maps to `{.code = 200}` with no payload, and failure raises
+`setStatus(APIStatus::Ok)` with no payload, and failure raises
 `UnauthorizedHTTPError` → **401**, not 403.
+
+**Corrected 2026-08-08 — the success code on ≥5.2 is `204`, not `200`.** This section previously
+said `{.code = 200}`, and the implementation's status switch therefore sent every 5.2 login to its
+`default:` arm and reported `login returned 204 OK`. Orphanarr could not authenticate against
+**any** qBittorrent 5.2.x. The mechanism: 5.2 rewrote `AuthController::loginAction()` to call
+`setStatus(APIStatus::Ok)` and **dropped the `setResult(u"Ok."_s)`** that used to supply a body
+([`release-5.2.1 authcontroller.cpp`][qb-auth521]); `webapplication.cpp` then does
+`if (result.data.isNull()) status(204)`, and qBittorrent's `status()` **defaults its reason phrase
+to `"OK"`** — which is why the wire carries the otherwise nonexistent `HTTP/1.1 204 OK`. Confirmed
+empirically against a 5.2.1 instance. The full contract, both halves, is now pinned by
+`internal/client/qbittorrent_login_test.go`:
+
+| version | success | failure |
+|---|---|---|
+| ≤5.1.x | `200`, body `Ok.` ([`release-5.1.2`][qb-auth512]) | `200`, body `Fails.` |
+| ≥5.2.0 | **`204`, empty body** | `401` |
+
+This is not confined to unusual setups. On 5.2 *every* successful login is a 204, whether it
+validated credentials or short-circuited on `m_sessionManager->session()` — the latter being what
+happens under **WebUI auth bypass for a whitelisted subnet**, or whenever our own `SID` cookie is
+still valid and `login()` is called again after a 403-triggered session reset.
+
+[qb-auth521]: https://github.com/qbittorrent/qBittorrent/blob/release-5.2.1/src/webui/api/authcontroller.cpp
+[qb-auth512]: https://github.com/qbittorrent/qBittorrent/blob/release-5.1.2/src/webui/api/authcontroller.cpp
 
 **Status codes, and the diagnostic that has to work.** Rejection by credentials *and* rejection by
 `validateHostHeader()` are both 401 with body `Unauthorized`, so the Test button cannot tell them
@@ -2459,7 +2483,7 @@ test in `tests/verification/` run on the development machine. Full ledger with c
 
 | Claim | Reality |
 |---|---|
-| Login success returns `200` with body `"Ok."` | 5.x returns **200 with an empty body**; failure is **401**. Authenticate on status code + `SID` cookie. |
+| Login success returns `200` with body `"Ok."` | Split by version: **≤5.1.x is `200` body `"Ok."`** (failure `200` `"Fails."`); **≥5.2.0 is `204` with an empty body** (failure `401`). Authenticate on status code + `SID` cookie. **This row itself said "200 with an empty body" until 2026-08-08 — wrong for both halves, and it shipped: no 5.2 instance could authenticate. See §3.7.** |
 | `state` includes `pausedUP`/`pausedDL` on 5.x | Source emits `stoppedUP`/`stoppedDL`. The published 5.0 wiki was never updated and also omits `forcedMetaDL`. `stoppedUP` and `queuedUP` remain **distinct** in every shipped release. |
 | Both `Referer` and `Origin` absent ⇒ qBittorrent rejects the request | **False, and the usual advice is backwards.** `isCrossSiteRequest()` returns *not cross-site* when both are absent — verbatim source comment: *"lets be permissive here."* Injecting `Referer` moves you into the branch that must match `Host`, which a reverse proxy rewrites. Send neither by default. |
 | Auth rejection is a 403 | **401.** 403 means two different things split by endpoint: on `auth/login` it is the `WebUIMaxAuthFailCount` **IP ban** (thrown only from `validateCredentials()`); on a non-login endpoint it is an **absent or expired session**. The design branches on both (§3.7). |

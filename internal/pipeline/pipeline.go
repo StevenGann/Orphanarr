@@ -338,6 +338,28 @@ func (p *Pipeline) ScanNow(ctx context.Context) (api.Summary, error) {
 	var candidates []scan.Candidate
 	var categorisedPeers []scan.Candidate
 
+	// A scan with nothing to scan logged "0 items, 0 orphans" — the exact
+	// line a genuinely clean run prints. Reload drops disabled clients
+	// before the pipeline ever sees them, so an all-disabled or all-failing
+	// config produced no error, no SKIP_* code, and no way to tell a
+	// working install from a broken one. §9's "why isn't it doing
+	// anything" panel has to be able to answer this case too.
+	scannable := 0
+	for _, e := range clients {
+		if e.Scannable {
+			scannable++
+		}
+	}
+	if scannable == 0 {
+		msg := "no download client is enabled — a disabled client is skipped entirely"
+		if len(clients) > 0 {
+			msg = fmt.Sprintf("all %d enabled client(s) failed their probe", len(clients))
+		}
+		p.db.LogEvent(ctx, store.Event{
+			Level: "warn", Code: "NO_CLIENTS_SCANNABLE", Message: msg,
+		})
+	}
+
 	for _, e := range clients {
 		if !e.Scannable {
 			// One dead or refused client must never stall the others.
